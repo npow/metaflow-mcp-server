@@ -4,16 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metaflow-mcp-server"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for Metaflow -- expose flow runs, logs, and artifacts as tools for AI coding agents"
 readme = "README.md"
-license = "Apache-2.0"
 requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
 ]
 dependencies = [
     "metaflow>=2.12.0",
