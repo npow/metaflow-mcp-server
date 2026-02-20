@@ -1,9 +1,9 @@
 # Metaflow MCP Server
 
-[![CI](https://github.com/Netflix/metaflow-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/Netflix/metaflow-mcp-server/actions/workflows/ci.yml)
+[![CI](https://github.com/npow/metaflow-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/npow/metaflow-mcp-server/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/metaflow-mcp-server)](https://pypi.org/project/metaflow-mcp-server/)
 [![Python](https://img.shields.io/pypi/pyversions/metaflow-mcp-server)](https://pypi.org/project/metaflow-mcp-server/)
-[![License](https://img.shields.io/github/license/Netflix/metaflow-mcp-server)](LICENSE)
+[![License](https://img.shields.io/github/license/npow/metaflow-mcp-server)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blue)](https://modelcontextprotocol.io/)
 
 Give your coding agent superpowers over your Metaflow workflows. Instead of writing throwaway scripts to check run status or dig through logs, just ask -- your agent will figure out the rest.
