@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metaflow-mcp-server"
+version = "0.1.0"
+description = "MCP server for Metaflow -- expose flow runs, logs, and artifacts as tools for AI coding agents"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+dependencies = [
+    "metaflow>=2.12.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0.0"]
+
+[project.scripts]
+metaflow-mcp-server = "metaflow_mcp_server.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
