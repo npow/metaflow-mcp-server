@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "MCP server for Metaflow -- expose flow runs, logs, and artifacts as tools for AI coding agents"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "metaflow>=2.12.0",
     "mcp>=1.0.0",
