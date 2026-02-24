@@ -151,6 +151,97 @@ def _ref_complex_artifact_diff(ctx: TestContext) -> str:
     return json.dumps(results, default=str)
 
 
+def _ref_simple_list_flows(ctx: TestContext) -> str:
+    from metaflow import Metaflow
+    flows = []
+    for flow in Metaflow():
+        flows.append(flow.id)
+        if len(flows) >= 10:
+            break
+    return json.dumps({"flows": flows, "count": len(flows)})
+
+
+def _ref_medium_filtered_runs(ctx: TestContext) -> str:
+    from metaflow import Flow
+    flow = Flow(ctx.flow_name)
+    runs = []
+    for run in flow:
+        if run.successful:
+            runs.append({
+                "pathspec": run.pathspec,
+                "successful": True,
+                "created_at": str(run.created_at),
+            })
+        if len(runs) >= 3:
+            break
+    return json.dumps(runs, default=str)
+
+
+def _ref_medium_bounded_logs(ctx: TestContext) -> str:
+    from metaflow import Task
+    task = Task(ctx.task_pathspec)
+    stderr = task.stderr or ""
+    lines = stderr.splitlines()
+    last_10 = lines[-10:] if len(lines) > 10 else lines
+    return json.dumps({
+        "pathspec": ctx.task_pathspec,
+        "stderr_tail": "\n".join(last_10),
+        "total_lines": len(lines),
+    })
+
+
+def _ref_medium_run_timing(ctx: TestContext) -> str:
+    from metaflow import Run
+    run = Run(ctx.run_pathspec)
+    steps = []
+    for step in run:
+        for task in step:
+            dur = None
+            if task.created_at and task.finished_at:
+                s = task.created_at
+                e = task.finished_at
+                if s.tzinfo is None:
+                    from datetime import timezone
+                    s = s.replace(tzinfo=timezone.utc)
+                if e.tzinfo is None:
+                    from datetime import timezone
+                    e = e.replace(tzinfo=timezone.utc)
+                dur = round((e - s).total_seconds(), 1)
+            steps.append({
+                "step": step.id,
+                "task": task.id,
+                "duration_seconds": dur,
+            })
+            break  # first task per step
+    return json.dumps({"pathspec": run.pathspec, "steps": steps}, default=str)
+
+
+def _ref_complex_artifact_search(ctx: TestContext) -> str:
+    from metaflow import Flow
+    flow = Flow(ctx.flow_name)
+    results = []
+    scanned = 0
+    for run in flow:
+        scanned += 1
+        if scanned > 5:
+            break
+        for step in run:
+            for task in step:
+                for art in task:
+                    if art.id == ctx.artifact_name:
+                        results.append({
+                            "task": task.pathspec,
+                            "step": step.id,
+                            "run": run.pathspec,
+                        })
+                        break
+    return json.dumps({
+        "artifact_name": ctx.artifact_name,
+        "runs_scanned": scanned,
+        "matches": results,
+    }, default=str)
+
+
 def _ref_complex_debug_flow(ctx: TestContext) -> str:
     from metaflow import Flow
     flow = Flow(ctx.flow_name)
@@ -196,6 +287,12 @@ def build_tasks(ctx: TestContext) -> list[BenchmarkTask]:
             reference_fn=_ref_simple_config,
         ),
         BenchmarkTask(
+            id="simple_list_flows",
+            category="simple",
+            prompt_template="List the available Metaflow flows. Show their names.",
+            reference_fn=_ref_simple_list_flows,
+        ),
+        BenchmarkTask(
             id="simple_list_runs",
             category="simple",
             prompt_template="List the last 3 runs of the flow '{flow_name}'. Show their pathspecs and whether they succeeded.",
@@ -224,6 +321,27 @@ def build_tasks(ctx: TestContext) -> list[BenchmarkTask]:
             skip_reason=None if (ctx.task_pathspec and ctx.artifact_name) else "no artifact discovered",
         ),
         BenchmarkTask(
+            id="medium_filtered_runs",
+            category="medium",
+            prompt_template="List the last 3 successful runs of flow '{flow_name}'. Show their pathspecs and creation times.",
+            reference_fn=_ref_medium_filtered_runs,
+            skip_reason=None if ctx.flow_name else "no flow discovered",
+        ),
+        BenchmarkTask(
+            id="medium_bounded_logs",
+            category="medium",
+            prompt_template="Show the last 10 lines of stderr for task '{task}'.",
+            reference_fn=_ref_medium_bounded_logs,
+            skip_reason=None if ctx.task_pathspec else "no task discovered",
+        ),
+        BenchmarkTask(
+            id="medium_run_timing",
+            category="medium",
+            prompt_template="Show the duration of each step in run '{run}'. Report the step name and how long its first task took in seconds.",
+            reference_fn=_ref_medium_run_timing,
+            skip_reason=None if ctx.run_pathspec else "no run discovered",
+        ),
+        BenchmarkTask(
             id="complex_latest_failure",
             category="complex",
             prompt_template="Find the most recent failed run of '{failed_flow}' (a run that finished but was not successful) and show the error details including the failing step and exception. If no failed runs exist, say so.",
@@ -250,6 +368,13 @@ def build_tasks(ctx: TestContext) -> list[BenchmarkTask]:
             prompt_template="Compare the artifacts from the 'end' step of the 2 most recent successful runs of '{flow_name}'. Show what changed.",
             reference_fn=_ref_complex_artifact_diff,
             skip_reason=None if ctx.flow_name else "no flow discovered",
+        ),
+        BenchmarkTask(
+            id="complex_artifact_search",
+            category="complex",
+            prompt_template="Search the last 5 runs of '{flow_name}' to find which tasks produced an artifact named '{artifact}'. Report the task pathspecs where it was found.",
+            reference_fn=_ref_complex_artifact_search,
+            skip_reason=None if (ctx.flow_name and ctx.artifact_name) else "no artifact discovered",
         ),
         BenchmarkTask(
             id="complex_debug_flow",
