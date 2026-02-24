@@ -16,7 +16,9 @@ Usage:
 """
 
 import json
+import re
 import traceback
+from datetime import datetime, timezone
 from functools import wraps
 
 from mcp.server import FastMCP
@@ -57,6 +59,44 @@ def _handle_errors(fn):
     return wrapper
 
 
+def _parse_dt(s):
+    """Parse an ISO datetime string, assuming UTC if no timezone is given."""
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _ensure_tz(dt):
+    """Ensure a datetime has timezone info (assume UTC if missing)."""
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _duration(start, end):
+    """Compute duration in seconds between two datetimes, or None."""
+    if start and end:
+        s = _ensure_tz(start)
+        e = _ensure_tz(end)
+        return round((e - s).total_seconds(), 1)
+    return None
+
+
+def _filter_log(text, head=None, tail=None, pattern=None):
+    """Apply head/tail/pattern filters to log text."""
+    if not text:
+        return text
+    lines = text.splitlines(keepends=True)
+    if pattern:
+        lines = [l for l in lines if re.search(pattern, l)]
+    if tail is not None:
+        lines = lines[-tail:]
+    elif head is not None:
+        lines = lines[:head]
+    return "".join(lines)
+
+
 # ── Configuration ─────────────────────────────────────────────
 
 
@@ -89,25 +129,90 @@ def get_config() -> str:
     )
 
 
+# ── Flow Discovery ───────────────────────────────────────────
+
+
+@mcp.tool()
+@_handle_errors
+def list_flows(last_n: int = 50) -> str:
+    """List available Metaflow flows.
+
+    Returns flow names visible in the current namespace.
+    Use this to discover flows before searching for runs.
+
+    Args:
+        last_n: Max number of flows to return (default 50).
+    """
+    from metaflow import Metaflow
+
+    flows = []
+    for flow in Metaflow():
+        if len(flows) >= last_n:
+            break
+        flows.append(flow.id)
+    return _json({"flows": flows, "count": len(flows)})
+
+
 # ── Run Discovery ─────────────────────────────────────────────
 
 
 @mcp.tool()
 @_handle_errors
-def search_runs(flow_name: str, last_n: int = 5) -> str:
-    """Find recent runs of a flow.
+def search_runs(
+    flow_name: str,
+    last_n: int = 5,
+    status: str | None = None,
+    created_after: str | None = None,
+    created_before: str | None = None,
+    tags: list[str] | None = None,
+) -> str:
+    """Find recent runs of a flow with optional filters.
 
     Args:
         flow_name: Name of the flow class (e.g. "MyFlow").
-        last_n: Max number of runs to return (default 5).
+        last_n: Max number of matching runs to return (default 5).
+        status: Filter by status: "successful", "failed", or "running".
+        created_after: ISO datetime -- only runs created after this time (e.g. "2024-01-15" or "2024-01-15T10:30:00").
+        created_before: ISO datetime -- only runs created before this time.
+        tags: Only include runs that have all of these user tags.
     """
     from metaflow import Flow
 
     flow = Flow(flow_name)
+    after_dt = _parse_dt(created_after) if created_after else None
+    before_dt = _parse_dt(created_before) if created_before else None
+
     runs = []
+    scanned = 0
+    MAX_SCAN = 200
+
     for run in flow:
-        if len(runs) >= last_n:
+        scanned += 1
+        if scanned > MAX_SCAN:
             break
+
+        created = _ensure_tz(run.created_at)
+
+        # Runs are reverse-chronological: stop once past the time window.
+        if after_dt and created < after_dt:
+            break
+
+        if before_dt and created > before_dt:
+            continue
+
+        if status:
+            if status == "successful" and not run.successful:
+                continue
+            elif status == "failed" and not (run.finished and not run.successful):
+                continue
+            elif status == "running" and run.finished:
+                continue
+
+        if tags:
+            user_tags = run.user_tags
+            if not all(t in user_tags for t in tags):
+                continue
+
         runs.append(
             {
                 "pathspec": run.pathspec,
@@ -119,6 +224,10 @@ def search_runs(flow_name: str, last_n: int = 5) -> str:
                 "tags": sorted(run.user_tags),
             }
         )
+
+        if len(runs) >= last_n:
+            break
+
     return _json({"flow": flow_name, "count": len(runs), "runs": runs})
 
 
@@ -142,17 +251,23 @@ def get_run(pathspec: str) -> str:
                     "id": task.id,
                     "successful": task.successful,
                     "finished": task.finished,
+                    "created_at": str(task.created_at),
                     "finished_at": str(task.finished_at) if task.finished_at else None,
+                    "duration_seconds": _duration(task.created_at, task.finished_at),
                 }
             )
-        steps.append({"step": step.id, "tasks": tasks})
+        steps.append(
+            {"step": step.id, "created_at": str(step.created_at), "tasks": tasks}
+        )
 
     return _json(
         {
             "pathspec": run.pathspec,
             "successful": run.successful,
             "finished": run.finished,
+            "created_at": str(run.created_at),
             "finished_at": str(run.finished_at) if run.finished_at else None,
+            "duration_seconds": _duration(run.created_at, run.finished_at),
             "tags": sorted(run.user_tags),
             "steps": steps,
         }
@@ -164,22 +279,36 @@ def get_run(pathspec: str) -> str:
 
 @mcp.tool()
 @_handle_errors
-def get_task_logs(pathspec: str, stdout: bool = True, stderr: bool = True) -> str:
+def get_task_logs(
+    pathspec: str,
+    stdout: bool = True,
+    stderr: bool = True,
+    tail: int | None = None,
+    head: int | None = None,
+    pattern: str | None = None,
+) -> str:
     """Get stdout/stderr logs for a specific task.
 
     Args:
         pathspec: Task pathspec like "FlowName/RunID/StepName/TaskID".
         stdout: Include stdout (default true).
         stderr: Include stderr (default true).
+        tail: Return only the last N lines of each log.
+        head: Return only the first N lines of each log (ignored if tail is set).
+        pattern: Regex pattern -- return only lines matching this pattern.
     """
     from metaflow import Task
 
     task = Task(pathspec)
     result = {"pathspec": pathspec}
     if stdout:
-        result["stdout"] = task.stdout
+        result["stdout"] = _filter_log(
+            task.stdout, head=head, tail=tail, pattern=pattern
+        )
     if stderr:
-        result["stderr"] = task.stderr
+        result["stderr"] = _filter_log(
+            task.stderr, head=head, tail=tail, pattern=pattern
+        )
     return _json(result)
 
 
@@ -188,11 +317,14 @@ def get_task_logs(pathspec: str, stdout: bool = True, stderr: bool = True) -> st
 def list_artifacts(pathspec: str) -> str:
     """List all artifacts produced by a task (or the first task of a step).
 
+    Returns artifact names and metadata without loading data.
+    Use get_artifact to retrieve actual values.
+
     Args:
         pathspec: Task pathspec like "FlowName/RunID/StepName/TaskID",
                   or step pathspec like "FlowName/RunID/StepName" (uses first task).
     """
-    from metaflow import Task, Step
+    from metaflow import Step, Task
 
     parts = pathspec.split("/")
     if len(parts) == 3:
@@ -206,8 +338,8 @@ def list_artifacts(pathspec: str) -> str:
         artifacts.append(
             {
                 "name": art.id,
-                "type": type(art.data).__name__,
-                "size": repr(art.data)[:80],
+                "sha": art.sha,
+                "created_at": str(art.created_at),
             }
         )
     return _json({"pathspec": task.pathspec, "artifacts": artifacts})
@@ -242,49 +374,120 @@ def get_artifact(pathspec: str, name: str) -> str:
 
 @mcp.tool()
 @_handle_errors
-def get_latest_failure(flow_name: str) -> str:
-    """Find the most recent failed run and return its error details.
+def get_latest_failure(flow_name: str, last_n_runs: int = 20) -> str:
+    """Find failed runs and return error details.
 
-    Finds the failed run, identifies the failing step/task, and returns
-    the exception and stderr in one call. Scans the most recent 20 runs.
+    Scans recent runs, finds all failures, and returns the failing
+    step/task with exception and stderr for each.
 
     Args:
         flow_name: Name of the flow.
+        last_n_runs: How many recent runs to scan (default 20).
     """
     from metaflow import Flow
 
     flow = Flow(flow_name)
+    failures = []
     scanned = 0
     for run in flow:
         scanned += 1
-        if scanned > 20:
+        if scanned > last_n_runs:
             break
-        if run.finished and not run.successful:
-            for step in run:
-                for task in step:
-                    if task.finished and not task.successful:
-                        return _json(
-                            {
-                                "run": run.pathspec,
-                                "failing_step": step.id,
-                                "failing_task": task.pathspec,
-                                "exception": repr(task.exception)
-                                if task.exception
-                                else None,
-                                "stderr_tail": (task.stderr or "")[-2000:],
-                            }
-                        )
-            return _json(
-                {
-                    "run": run.pathspec,
-                    "failing_step": None,
-                    "failing_task": None,
-                    "note": "Run failed but could not identify failing task",
-                }
-            )
+        if not (run.finished and not run.successful):
+            continue
+
+        failure = {
+            "run": run.pathspec,
+            "created_at": str(run.created_at),
+            "failing_step": None,
+            "failing_task": None,
+            "exception": None,
+            "stderr_tail": None,
+        }
+
+        for step in run:
+            for task in step:
+                if task.finished and not task.successful:
+                    failure["failing_step"] = step.id
+                    failure["failing_task"] = task.pathspec
+                    failure["exception"] = (
+                        repr(task.exception) if task.exception else None
+                    )
+                    failure["stderr_tail"] = (task.stderr or "")[-2000:]
+                    break
+            if failure["failing_task"]:
+                break
+
+        if not failure["failing_task"]:
+            failure["note"] = "Run failed but could not identify failing task"
+        failures.append(failure)
 
     return _json(
-        {"message": "No failed runs found in the last %d runs of %s" % (scanned, flow_name)}
+        {
+            "flow": flow_name,
+            "runs_scanned": scanned,
+            "failures_found": len(failures),
+            "failures": failures,
+        }
+    )
+
+
+@mcp.tool()
+@_handle_errors
+def search_artifacts(
+    flow_name: str,
+    artifact_name: str,
+    last_n_runs: int = 5,
+    step_name: str | None = None,
+) -> str:
+    """Search for a named artifact across recent runs of a flow.
+
+    Scans recent runs to find which tasks produced an artifact with the
+    given name. Does not load artifact data. Use get_artifact to retrieve values.
+
+    Note: for runs with many parallel tasks this may be slow. Use step_name
+    to narrow the search.
+
+    Args:
+        flow_name: Name of the flow class.
+        artifact_name: Name of the artifact to search for (e.g. "model", "accuracy").
+        last_n_runs: Number of recent runs to scan (default 5).
+        step_name: Only search within this step (e.g. "train"). Recommended for large flows.
+    """
+    from metaflow import Flow
+
+    flow = Flow(flow_name)
+    results = []
+    scanned = 0
+    for run in flow:
+        scanned += 1
+        if scanned > last_n_runs:
+            break
+        for step in run:
+            if step_name and step.id != step_name:
+                continue
+            for task in step:
+                for art in task:
+                    if art.id == artifact_name:
+                        results.append(
+                            {
+                                "task": task.pathspec,
+                                "step": step.id,
+                                "run": run.pathspec,
+                                "created_at": str(art.created_at),
+                                "sha": art.sha,
+                            }
+                        )
+                        break  # Found in this task, move to next
+
+    return _json(
+        {
+            "flow": flow_name,
+            "artifact_name": artifact_name,
+            "runs_scanned": scanned,
+            "matches_found": len(results),
+            "matches": results,
+        }
     )
 
 
