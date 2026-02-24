@@ -53,7 +53,7 @@ class CFCodeModeApproach(Approach):
             "Chain multiple calls in one script — intermediate results stay in your code.\n"
             "```python\n"
             "import json\n"
-            "from metaflow_mcp_server.server import search_runs, get_run\n"
+            "from metaflow_mcp_server.server import list_flows, search_runs, get_run\n"
             "runs = json.loads(search_runs(flow_name='MyFlow', last_n=5))\n"
             "for r in runs['runs']:\n"
             "    detail = json.loads(get_run(pathspec=r['pathspec']))\n"

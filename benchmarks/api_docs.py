@@ -100,13 +100,13 @@ def generate_api_schema() -> list[dict]:
     """
     import inspect as _inspect
     from metaflow_mcp_server.server import (
-        get_config, search_runs, get_run, get_task_logs,
-        list_artifacts, get_artifact, get_latest_failure,
+        get_config, list_flows, search_runs, get_run, get_task_logs,
+        list_artifacts, get_artifact, get_latest_failure, search_artifacts,
     )
 
     schema = []
-    for fn in [get_config, search_runs, get_run, get_task_logs,
-               list_artifacts, get_artifact, get_latest_failure]:
+    for fn in [get_config, list_flows, search_runs, get_run, get_task_logs,
+               list_artifacts, get_artifact, get_latest_failure, search_artifacts]:
         # Unwrap the _handle_errors decorator
         inner = fn.__wrapped__ if hasattr(fn, '__wrapped__') else fn
         try:

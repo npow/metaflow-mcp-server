@@ -1,12 +1,12 @@
 # Benchmark: MCP Tools vs Code Generation
 
-Do LLMs perform better calling structured MCP tools, or writing code to call APIs? We tested four approaches against 10 Metaflow tasks of increasing complexity.
+Do LLMs perform better calling structured MCP tools, or writing code to call APIs? We tested four approaches against 15 Metaflow tasks of increasing complexity.
 
 ## Approaches
 
 | Approach | How it works |
 |----------|-------------|
-| **MCP Direct** | Claude Code calls the 7 Metaflow MCP tools directly |
+| **MCP Direct** | Claude Code calls the 9 Metaflow MCP tools directly |
 | **CF Code Mode** | Cloudflare's [search+execute](https://blog.cloudflare.com/code-mode/) pattern — model discovers the API by writing code that queries the schema server-side, then writes code that calls the discovered functions |
 | **Code Mode** | Claude Code writes and executes Python code using the Metaflow client library directly (bypasses MCP) |
 | **Skill** | Same as Code Mode, but with the full Metaflow API reference (~4K tokens) embedded in the system prompt |
@@ -16,17 +16,22 @@ Do LLMs perform better calling structured MCP tools, or writing code to call API
 | ID | Category | Description |
 |----|----------|-------------|
 | `simple_config` | simple | What backend am I connected to? |
+| `simple_list_flows` | simple | List available flows |
 | `simple_list_runs` | simple | List last 3 runs of a flow |
 | `medium_run_details` | medium | Step-by-step breakdown of a run |
 | `medium_task_logs` | medium | Show stdout/stderr for a task |
 | `medium_artifact_inspect` | medium | List artifacts, show one value |
+| `medium_filtered_runs` | medium | List last 3 successful runs (status filter) |
+| `medium_bounded_logs` | medium | Last 10 lines of stderr (bounded logs) |
+| `medium_run_timing` | medium | Duration of each step in a run |
 | `complex_latest_failure` | complex | Find latest failure with error details |
 | `complex_success_rate` | complex | Success rate of last 10 runs |
 | `complex_compare_runs` | complex | Compare steps of 2 recent runs |
 | `complex_artifact_diff` | complex | Compare artifacts across runs |
+| `complex_artifact_search` | complex | Search for named artifact across runs |
 | `complex_debug_flow` | complex | Full investigation: count, rate, errors |
 
-## Results (4 approaches x 3 models x 10 tasks = 120 runs)
+## Results (4 approaches x 3 models x 15 tasks = 180 runs)
 
 ```
 Approach      Model      Tokens (med)  Tokens (min/max)  Time (med)  Total Cost  Score (med)  Score (min)
@@ -49,9 +54,9 @@ Correctness scored by LLM-as-judge (Sonnet) on a 0.0-1.0 scale against ground tr
 
 ## Takeaways
 
-1. **MCP tools win for small, focused APIs.** MCP Direct uses the fewest tokens and is the cheapest across all models. With only 7 well-designed tools, there's nothing for code generation to compress.
+1. **MCP tools win for small, focused APIs.** MCP Direct uses the fewest tokens and is the cheapest across all models. With only 9 well-designed tools, there's nothing for code generation to compress.
 
-2. **CF Code Mode (Cloudflare's pattern) performed worst.** The search+execute two-phase approach adds overhead without benefit when there are only 7 tools to discover. All three models scored 0.0 on at least one task.
+2. **CF Code Mode (Cloudflare's pattern) performed worst.** The search+execute two-phase approach adds overhead without benefit when there are only 9 tools to discover. All three models scored 0.0 on at least one task.
 
 3. **MCP Direct + Haiku is the best value.** $0.033 total for 10 tasks, 45.8s median latency, median score of 1.0.
 
@@ -59,7 +64,7 @@ Correctness scored by LLM-as-judge (Sonnet) on a 0.0-1.0 scale against ground tr
 
 5. **Code generation has high variance.** Code Mode token range for Haiku: 318-5511 (17x). MCP Direct: 278-1232 (4.4x). When code fails, the model retries and burns tokens.
 
-6. **The crossover point matters.** CF Code Mode is designed for APIs with hundreds or thousands of endpoints. For 7 tools, it's pure overhead. The threshold where search+execute beats direct tools likely lies well above 7.
+6. **The crossover point matters.** CF Code Mode is designed for APIs with hundreds or thousands of endpoints. For 9 tools, it's pure overhead. The threshold where search+execute beats direct tools likely lies well above 9.
 
 ## Running the benchmark
 
