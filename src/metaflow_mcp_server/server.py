@@ -533,6 +533,76 @@ def search_artifacts(
     )
 
 
+@mcp.tool()
+@_handle_errors
+def get_recent_runs(
+    namespace: str,
+    last_n_flows: int = 20,
+    last_n_runs_per_flow: int = 3,
+    status: str | None = None,
+) -> str:
+    """Find the most recent runs across all flows in a namespace.
+
+    Use this when the user asks about "my last run" or "my recent runs" without
+    specifying a flow name. Scans all flows in the namespace and returns runs
+    sorted by creation time (newest first).
+
+    Args:
+        namespace: Metaflow namespace to scope results (e.g. "user:npow").
+                   Use get_config to find your default_namespace.
+        last_n_flows: How many flows to scan (default 20).
+        last_n_runs_per_flow: How many recent runs to check per flow (default 3).
+        status: Filter by status: "successful", "failed", or "running".
+    """
+    import metaflow as mf
+
+    mf.namespace(namespace)
+    try:
+        flows = list(mf.Metaflow())[:last_n_flows]
+        all_runs = []
+        for flow in flows:
+            count = 0
+            for run in flow:
+                if count >= last_n_runs_per_flow:
+                    break
+                count += 1
+                if status:
+                    if status == "successful" and not run.successful:
+                        continue
+                    elif status == "failed" and not (run.finished and not run.successful):
+                        continue
+                    elif status == "running" and run.finished:
+                        continue
+                all_runs.append(
+                    {
+                        "pathspec": run.pathspec,
+                        "flow": flow.id,
+                        "successful": run.successful,
+                        "finished": run.finished,
+                        "created_at": run.created_at,
+                        "finished_at": run.finished_at,
+                        "duration_seconds": _duration(run.created_at, run.finished_at),
+                        "tags": sorted(run.user_tags),
+                    }
+                )
+    finally:
+        mf.namespace(None)
+
+    all_runs.sort(key=lambda r: _ensure_tz(r["created_at"]) if r["created_at"] else datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    for r in all_runs:
+        r["created_at"] = str(r["created_at"])
+        r["finished_at"] = str(r["finished_at"]) if r["finished_at"] else None
+
+    return _json(
+        {
+            "namespace": namespace,
+            "flows_scanned": len(flows),
+            "runs_found": len(all_runs),
+            "runs": all_runs,
+        }
+    )
+
+
 def main():
     mcp.run(transport="stdio")
 
