@@ -543,9 +543,9 @@ def get_recent_runs(
 ) -> str:
     """Find the most recent runs across all flows in a namespace.
 
-    Use this when the user asks about "my last run" or "my recent runs" without
-    specifying a flow name. Scans all flows in the namespace and returns runs
-    sorted by creation time (newest first).
+    Use this when no specific flow name is given and you need to find what the
+    user ran recently. Scans all flows in the namespace and returns runs sorted
+    by creation time (newest first).
 
     Args:
         namespace: Metaflow namespace to scope results (e.g. "user:npow").
