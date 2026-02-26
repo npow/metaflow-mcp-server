@@ -47,6 +47,7 @@ class TestToolRegistration:
             "get_artifact",
             "get_latest_failure",
             "search_artifacts",
+            "get_recent_runs",
         }
         assert expected == names
 
