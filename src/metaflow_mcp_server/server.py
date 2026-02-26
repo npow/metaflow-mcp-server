@@ -115,6 +115,9 @@ def get_config() -> str:
     """Show current Metaflow configuration.
 
     Returns the active metadata provider, datastore, namespace, and profile.
+    Also returns the user's default namespace (e.g. "user:npow") -- pass this
+    as the namespace parameter to list_flows/search_runs/get_latest_failure to
+    scope results to only your own runs.
     Use this first to understand what backend you're connected to.
     """
     import os
@@ -130,9 +133,8 @@ def get_config() -> str:
     return _json(
         {
             "metadata_provider": get_metadata(),
-            "namespace": "global (None -- all runs visible)",
-            "username": username,
-            "user_namespace": f"user:{username}" if username else None,
+            "active_namespace": "global (None -- all runs visible)",
+            "default_namespace": f"user:{username}" if username else None,
             "default_datastore": DEFAULT_DATASTORE,
             "default_metadata": DEFAULT_METADATA,
             "default_environment": DEFAULT_ENVIRONMENT,
@@ -146,32 +148,32 @@ def get_config() -> str:
 
 @mcp.tool()
 @_handle_errors
-def list_flows(last_n: int = 50, username: str | None = None) -> str:
+def list_flows(last_n: int = 50, namespace: str | None = None) -> str:
     """List available Metaflow flows.
 
-    Returns flow names visible in the current namespace.
+    Returns flow names visible in the given namespace.
     Use this to discover flows before searching for runs.
 
     Args:
         last_n: Max number of flows to return (default 50).
-        username: If provided, only return flows that have runs belonging to this user
-                  (scopes to "user:<username>" namespace). Use get_config to find the
-                  current user's username.
+        namespace: Metaflow namespace to scope results (e.g. "user:npow").
+                   Use get_config to find your default_namespace.
+                   If omitted, returns all flows visible globally.
     """
-    from metaflow import Metaflow, namespace
+    import metaflow as mf
 
-    if username:
-        namespace(f"user:{username}")
+    if namespace:
+        mf.namespace(namespace)
     try:
         flows = []
-        for flow in Metaflow():
+        for flow in mf.Metaflow():
             if len(flows) >= last_n:
                 break
             flows.append(flow.id)
-        return _json({"flows": flows, "count": len(flows), "username_filter": username})
+        return _json({"flows": flows, "count": len(flows), "namespace": namespace or "global"})
     finally:
-        if username:
-            namespace(None)  # restore global namespace
+        if namespace:
+            mf.namespace(None)  # restore global namespace
 
 
 # ── Run Discovery ─────────────────────────────────────────────
@@ -186,7 +188,7 @@ def search_runs(
     created_after: str | None = None,
     created_before: str | None = None,
     tags: list[str] | None = None,
-    username: str | None = None,
+    namespace: str | None = None,
 ) -> str:
     """Find recent runs of a flow with optional filters.
 
@@ -197,15 +199,21 @@ def search_runs(
         created_after: ISO datetime -- only runs created after this time (e.g. "2024-01-15" or "2024-01-15T10:30:00").
         created_before: ISO datetime -- only runs created before this time.
         tags: Only include runs that have all of these user tags.
-        username: If provided, only return runs tagged with "user:<username>".
-                  Use get_config to find the current user's username.
+        namespace: Metaflow namespace to scope results (e.g. "user:npow").
+                   Use get_config to find your default_namespace.
     """
-    from metaflow import Flow
+    import metaflow as mf
 
-    flow = Flow(flow_name)
+    if namespace:
+        mf.namespace(namespace)
+    try:
+        flow = mf.Flow(flow_name)
+    finally:
+        if namespace:
+            mf.namespace(None)
+
     after_dt = _parse_dt(created_after) if created_after else None
     before_dt = _parse_dt(created_before) if created_before else None
-    user_tag = f"user:{username}" if username else None
 
     runs = []
     scanned = 0
@@ -223,9 +231,6 @@ def search_runs(
             break
 
         if before_dt and created > before_dt:
-            continue
-
-        if user_tag and user_tag not in run.tags:
             continue
 
         if status:
@@ -402,7 +407,7 @@ def get_artifact(pathspec: str, name: str) -> str:
 
 @mcp.tool()
 @_handle_errors
-def get_latest_failure(flow_name: str, last_n_runs: int = 20, username: str | None = None) -> str:
+def get_latest_failure(flow_name: str, last_n_runs: int = 20, namespace: str | None = None) -> str:
     """Find failed runs and return error details.
 
     Scans recent runs, finds all failures, and returns the failing
@@ -411,21 +416,25 @@ def get_latest_failure(flow_name: str, last_n_runs: int = 20, username: str | No
     Args:
         flow_name: Name of the flow.
         last_n_runs: How many recent runs to scan (default 20).
-        username: If provided, only consider runs tagged with "user:<username>".
-                  Use get_config to find the current user's username.
+        namespace: Metaflow namespace to scope results (e.g. "user:npow").
+                   Use get_config to find your default_namespace.
     """
-    from metaflow import Flow
+    import metaflow as mf
 
-    flow = Flow(flow_name)
-    user_tag = f"user:{username}" if username else None
+    if namespace:
+        mf.namespace(namespace)
+    try:
+        flow = mf.Flow(flow_name)
+    finally:
+        if namespace:
+            mf.namespace(None)
+
     failures = []
     scanned = 0
     for run in flow:
         scanned += 1
         if scanned > last_n_runs:
             break
-        if user_tag and user_tag not in run.tags:
-            continue
         if not (run.finished and not run.successful):
             continue
 
