@@ -558,9 +558,12 @@ def get_recent_runs(
 
     mf.namespace(namespace)
     try:
-        flows = list(mf.Metaflow())[:last_n_flows]
         all_runs = []
-        for flow in flows:
+        flows_scanned = 0
+        for flow in mf.Metaflow():
+            if flows_scanned >= last_n_flows:
+                break
+            flows_scanned += 1
             count = 0
             for run in flow:
                 if count >= last_n_runs_per_flow:
@@ -596,7 +599,7 @@ def get_recent_runs(
     return _json(
         {
             "namespace": namespace,
-            "flows_scanned": len(flows),
+            "flows_scanned": flows_scanned,
             "runs_found": len(all_runs),
             "runs": all_runs,
         }
