@@ -18,13 +18,15 @@ Works with any Metaflow backend: local, S3, Azure, GCS, or Netflix internal.
 
 | Tool | Description |
 |------|-------------|
-| `get_config` | What backend am I connected to? |
+| `get_config` | What backend am I connected to? (also returns your default namespace) |
+| `list_flows` | What flows exist in a namespace? |
 | `search_runs` | Find recent runs of any flow |
 | `get_run` | Step-by-step breakdown of a run |
 | `get_task_logs` | Pull stdout/stderr from a task |
 | `list_artifacts` | What did this step produce? |
 | `get_artifact` | Grab an artifact's value |
 | `get_latest_failure` | What broke and why? |
+| `search_artifacts` | Which runs produced a named artifact? |
 
 ## Quickstart
 
@@ -34,6 +36,14 @@ claude mcp add --scope user metaflow -- metaflow-mcp-server
 ```
 
 That's it. Restart Claude Code and start asking questions about your flows.
+
+**To upgrade:**
+
+```bash
+pip install --upgrade metaflow-mcp-server
+```
+
+Then restart Claude Code (or reconnect via `/mcp`) to pick up the new version.
 
 If Metaflow lives in a specific venv, point to it:
 
