@@ -1,19 +1,19 @@
 # Benchmark: MCP Tools vs Code Generation
 
-Do LLMs perform better calling structured MCP tools, or writing code to call APIs? We tested four approaches against 15 Metaflow tasks of increasing complexity.
+Do LLMs perform better calling structured MCP tools, or writing code to call APIs? We tested four approaches against 22 Metaflow tasks of increasing complexity across three model sizes (264 runs total).
 
 ## Approaches
 
 | Approach | How it works |
 |----------|-------------|
-| **MCP Direct** | Claude Code calls the 9 Metaflow MCP tools directly |
-| **CF Code Mode** | Cloudflare's [search+execute](https://blog.cloudflare.com/code-mode/) pattern — model discovers the API by writing code that queries the schema server-side, then writes code that calls the discovered functions |
-| **Code Mode** | Claude Code writes and executes Python code using the Metaflow client library directly (bypasses MCP) |
-| **Skill** | Same as Code Mode, but with the full Metaflow API reference (~4K tokens) embedded in the system prompt |
+| **MCP Direct** | Claude calls the 10 Metaflow MCP tools directly. Minimal system prompt. |
+| **Skill** | Identical to MCP Direct, but with a detailed Metaflow reference document prepended to every prompt. |
+| **Code Mode** | No MCP tools. Claude writes Python or Bash against the Metaflow client library. |
+| **Search+Execute** | No MCP tools. Inspired by [Cloudflare's search+execute pattern](https://blog.cloudflare.com/building-ai-agents-with-workers/). The model calls `search_tool_schemas(keyword)` to discover relevant API functions before writing code. |
 
 ## Tasks
 
-| ID | Category | Description |
+| ID | Category | Prompt (abbreviated) |
 |----|----------|-------------|
 | `simple_config` | simple | What backend am I connected to? |
 | `simple_list_flows` | simple | List available flows |
@@ -21,67 +21,65 @@ Do LLMs perform better calling structured MCP tools, or writing code to call API
 | `medium_run_details` | medium | Step-by-step breakdown of a run |
 | `medium_task_logs` | medium | Show stdout/stderr for a task |
 | `medium_artifact_inspect` | medium | List artifacts, show one value |
-| `medium_filtered_runs` | medium | List last 3 successful runs (status filter) |
-| `medium_bounded_logs` | medium | Last 10 lines of stderr (bounded logs) |
+| `medium_filtered_runs` | medium | List last 3 successful runs |
+| `medium_bounded_logs` | medium | Last 10 lines of stderr |
 | `medium_run_timing` | medium | Duration of each step in a run |
 | `complex_latest_failure` | complex | Find latest failure with error details |
 | `complex_success_rate` | complex | Success rate of last 10 runs |
 | `complex_compare_runs` | complex | Compare steps of 2 recent runs |
-| `complex_artifact_diff` | complex | Compare artifacts across runs |
+| `complex_artifact_diff` | complex | Compare artifacts across 2 runs |
 | `complex_artifact_search` | complex | Search for named artifact across runs |
-| `complex_debug_flow` | complex | Full investigation: count, rate, errors |
+| `complex_debug_flow` | complex | Count, success rate, and latest error |
+| `hard_slowest_step` | hard | Slowest step across 2 recent runs |
+| `hard_artifact_timeline` | hard | Artifact value across 3 runs, oldest-first |
+| `hard_steps_per_flow` | hard | Which flow has the most steps? |
+| `disambig_count_run_states` | disambiguation | Count ALL runs by exact state |
+| `disambig_most_recent_state` | disambiguation | Classify the most recent run's state |
+| `disambig_unfinished_not_failed` | disambiguation | Count 5 recent runs by state |
+| `disambig_success_rate_finished_only` | disambiguation | Success rate among finished runs only |
 
-## Results (4 approaches x 3 models x 15 tasks = 180 runs)
+Disambiguation tasks specifically test whether the model distinguishes between a crashed run (finished=False) and a currently-running run — they look identical at the API level.
 
-```
-Approach      Model      Tokens (med)  Tokens (min/max)  Time (med)  Total Cost  Score (med)  Score (min)
-------------  -------  --------------  ----------------  ----------  ----------  -----------  -----------
-mcp_direct    haiku               576       278 / 1232       45.8s      $0.033         1.00         0.50
-mcp_direct    sonnet              669       327 / 1307       52.7s      $0.107         1.00         0.00
-mcp_direct    opus                273       152 / 996        45.0s      $0.305         1.00         0.25
-cf_code_mode  haiku               750       347 / 5467       50.1s      $0.062         1.00         0.00
-cf_code_mode  sonnet             1896       690 / 5575       98.4s      $0.340         1.00         0.00
-cf_code_mode  opus                771       323 / 2427       75.8s      $0.753         1.00         0.00
-code_mode     haiku               652       318 / 5511       50.9s      $0.063         1.00         0.00
-code_mode     sonnet              878       522 / 2299       54.4s      $0.173         1.00         0.50
-code_mode     opus                488       259 / 2705       50.5s      $0.595         1.00         0.75
-skill         haiku              1221       372 / 5684       54.4s      $0.088         1.00         0.00
-skill         sonnet             1029       624 / 1610       63.2s      $0.163         1.00         0.50
-skill         opus                576       275 / 1598       59.5s      $0.530         1.00         1.00
-```
+## Results
 
-Correctness scored by LLM-as-judge (Sonnet) on a 0.0-1.0 scale against ground truth from the Metaflow API.
+Correctness scored by LLM-as-judge (Claude) on a 0.0–1.0 scale against ground truth computed directly from the Metaflow API.
 
-## Takeaways
+### Accuracy by category (all models pooled)
 
-1. **MCP tools win for small, focused APIs.** MCP Direct uses the fewest tokens and is the cheapest across all models. With only 9 well-designed tools, there's nothing for code generation to compress.
+| Approach | Overall | Simple | Medium | Complex | Hard | Disambiguation |
+|----------|---------|--------|--------|---------|------|----------------|
+| MCP Direct | **0.98** | 1.00 | 0.94 | 0.99 | 1.00 | 1.00 |
+| Skill | **0.98** | 1.00 | 0.97 | 0.99 | 0.97 | 0.98 |
+| Search+Execute | 0.95 | 0.94 | 0.99 | 0.93 | 0.89 | 1.00 |
+| Code Mode | 0.88 | 0.86 | 0.89 | 0.88 | 0.83 | 0.94 |
 
-2. **CF Code Mode (Cloudflare's pattern) performed worst.** The search+execute two-phase approach adds overhead without benefit when there are only 9 tools to discover. All three models scored 0.0 on at least one task.
+The gap between MCP approaches and Code Mode is statistically significant (Wilcoxon signed-rank, p<0.01).
 
-3. **MCP Direct + Haiku is the best value.** $0.033 total for 10 tasks, 45.8s median latency, median score of 1.0.
+### Cost per task
 
-4. **Skill + Opus is the most reliable.** Perfect minimum score of 1.0 — the only configuration where every task was answered correctly.
-
-5. **Code generation has high variance.** Code Mode token range for Haiku: 318-5511 (17x). MCP Direct: 278-1232 (4.4x). When code fails, the model retries and burns tokens.
-
-6. **The crossover point matters.** CF Code Mode is designed for APIs with hundreds or thousands of endpoints. For 9 tools, it's pure overhead. The threshold where search+execute beats direct tools likely lies well above 9.
+| Approach | Average | Haiku | Sonnet | Opus |
+|----------|---------|-------|--------|------|
+| Code Mode | $0.56 | $0.12 | $0.29 | $1.28 |
+| MCP Direct | $0.62 | $0.10 | $0.32 | $1.43 |
+| Skill | $0.64 | $0.11 | $0.30 | $1.50 |
+| Search+Execute | **$1.16** | $0.13 | $0.53 | $2.81 |
 
 ## Running the benchmark
 
 ```bash
 pip install -e ".[benchmark]"
 
-# Start the claude-relay (required)
-claude-relay serve
+# Start claude-relay (required for subprocess Claude calls)
+cd ~/code/claude-relay && uv run agent-relay serve --port 8082
 
-# Full benchmark (12 workers in parallel)
+# Full benchmark
 python -m benchmarks --verbose
 
 # Quick test: one approach, one model, two tasks
 python -m benchmarks --approaches mcp_direct --models sonnet --tasks simple_config complex_success_rate
 
-# Skip correctness judging
-python -m benchmarks --skip-judge
+# Re-run judging only (after a crash)
+python -m benchmarks --judge-only benchmarks/results.raw.json
 ```
 
-Requires `claude-relay` running on `http://localhost:8082` (override with `RELAY_BASE_URL`).
+Requires `claude-relay` on `http://localhost:8082` (override with `RELAY_BASE_URL`).
