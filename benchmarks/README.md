@@ -1,6 +1,6 @@
 # Benchmark: MCP Tools vs Code Generation
 
-Do LLMs perform better calling structured MCP tools, or writing code to call APIs? We tested four approaches against 22 Metaflow tasks of increasing complexity across three model sizes (264 runs total).
+Do LLMs perform better calling structured MCP tools, or writing code to call APIs? We tested four approaches against 22 Metaflow tasks of increasing complexity across three model sizes and three trials per cell (4 × 3 × 22 × 3 = 792 runs), scored by a three-model judge ensemble (haiku/sonnet/opus).
 
 ## Approaches
 
@@ -42,7 +42,7 @@ Disambiguation tasks specifically test whether the model distinguishes between a
 
 ## Results
 
-Correctness scored by LLM-as-judge (Claude) on a 0.0–1.0 scale against ground truth computed directly from the Metaflow API.
+Correctness scored by a three-model judge ensemble (haiku + sonnet + opus), averaged per result, on a 0.0–1.0 scale against ground truth computed directly from the Metaflow API. Each (approach, model, task) cell is run 3 times; scores are averaged across trials before computing statistics.
 
 ### Accuracy by category (all models pooled)
 
@@ -72,11 +72,11 @@ pip install -e ".[benchmark]"
 # Start claude-relay (required for subprocess Claude calls)
 cd ~/code/claude-relay && uv run agent-relay serve --port 8082
 
-# Full benchmark
+# Full benchmark (3 trials per cell, 3-model judge ensemble)
 python -m benchmarks --verbose
 
-# Quick test: one approach, one model, two tasks
-python -m benchmarks --approaches mcp_direct --models sonnet --tasks simple_config complex_success_rate
+# Quick test: one approach, one model, two tasks, one trial
+python -m benchmarks --approaches mcp_direct --models sonnet --tasks simple_config complex_success_rate --trials 1
 
 # Re-run judging only (after a crash)
 python -m benchmarks --judge-only benchmarks/results.raw.json

@@ -25,8 +25,9 @@ PRICING = {
 # Harness limits
 MAX_TOKENS = 16384
 
-# Judge model
-JUDGE_MODEL = "sonnet"
+# Judging — all three models judge every answer; final score = mean
+JUDGE_MODEL = "sonnet"  # kept for backward compat; multi-judge uses JUDGE_MODELS
+JUDGE_MODELS = ["haiku", "sonnet", "opus"]
 
 
 def estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
@@ -37,11 +38,12 @@ def estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float
 
 @dataclass
 class TaskResult:
-    """Result of running a single (approach, model, task) combination."""
+    """Result of running a single (approach, model, task, trial) combination."""
 
     approach: str
     model: str
     task_id: str
+    trial: int = 0  # 0-indexed trial number within a cell
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
