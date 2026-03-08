@@ -535,6 +535,85 @@ def search_artifacts(
 
 @mcp.tool()
 @_handle_errors
+def get_source_code(
+    pathspec: str,
+    file_path: str | None = None,
+) -> str:
+    """Get the source code from a Metaflow run's code package.
+
+    Every Metaflow run that executes remotely stores a snapshot of the code.
+    Use this to inspect the exact code that was used in a run.
+
+    Without file_path, returns the main FlowSpec source file and lists all
+    files in the code package. With file_path, returns the content of that
+    specific file from the package.
+
+    Args:
+        pathspec: Run pathspec like "FlowName/RunID", or task pathspec
+                  like "FlowName/RunID/StepName/TaskID".
+        file_path: Optional path of a specific file within the code package.
+                   If omitted, returns the main flow file and a listing of
+                   all files in the package.
+    """
+    from metaflow import Run, Task
+
+    parts = pathspec.split("/")
+    if len(parts) == 2:
+        run = Run(pathspec)
+        code = run.code
+    elif len(parts) == 4:
+        task = Task(pathspec)
+        code = task.code
+    else:
+        return _json({"error": "pathspec must be FlowName/RunID or FlowName/RunID/StepName/TaskID"})
+
+    if code is None:
+        return _json({"error": "No code package found for this run/task. Code is only stored for runs with remote steps."})
+
+    if file_path:
+        # Return content of a specific file
+        try:
+            content = None
+            tarball = code.tarball
+            for member in tarball.getmembers():
+                if member.name == file_path or member.name.endswith("/" + file_path):
+                    f = tarball.extractfile(member)
+                    if f:
+                        content = f.read().decode("utf-8", errors="replace")
+                    break
+            if content is None:
+                return _json({"error": f"File '{file_path}' not found in code package"})
+            return _json({
+                "pathspec": pathspec,
+                "file_path": file_path,
+                "content": content,
+            })
+        except Exception as e:
+            return _json({"error": f"Failed to extract file: {e}"})
+    else:
+        # Return main flowspec + file listing
+        file_list = []
+        try:
+            tarball = code.tarball
+            for member in tarball.getmembers():
+                if member.isfile():
+                    file_list.append({
+                        "name": member.name,
+                        "size": member.size,
+                    })
+        except Exception:
+            pass  # tarball listing failed, still return flowspec
+
+        return _json({
+            "pathspec": pathspec,
+            "main_file": code.info.get("script", "unknown"),
+            "flowspec": code.flowspec,
+            "files": file_list,
+        })
+
+
+@mcp.tool()
+@_handle_errors
 def get_recent_runs(
     namespace: str,
     last_n_flows: int = 20,
