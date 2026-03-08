@@ -685,6 +685,65 @@ def get_recent_runs(
     )
 
 
+def get_tool_schemas() -> list[dict]:
+    """Return name, signature, and docstring for all registered MCP tools.
+
+    Intended for use by code-generation approaches that need to discover
+    available API functions at runtime without a hardcoded module path.
+
+    Example usage:
+        from metaflow_mcp_server.server import get_tool_schemas
+        for fn in get_tool_schemas():
+            print(fn['name'], fn['signature'])
+    """
+    import inspect
+
+    tool_fns = [
+        get_config,
+        list_flows,
+        search_runs,
+        get_run,
+        get_task_logs,
+        list_artifacts,
+        get_artifact,
+        get_latest_failure,
+        search_artifacts,
+        get_recent_runs,
+    ]
+    schemas = []
+    for fn in tool_fns:
+        schemas.append({
+            "name": fn.__name__,
+            "signature": str(inspect.signature(fn)),
+            "docstring": (fn.__doc__ or "").strip(),
+        })
+    return schemas
+
+
+def search_tool_schemas(keyword: str) -> list[dict]:
+    """Search registered MCP tools by keyword.
+
+    Returns schemas for tools whose name or docstring contains the keyword
+    (case-insensitive substring match). Use this to discover which API
+    functions are relevant before calling them — the full schema list is
+    not available without searching.
+
+    Args:
+        keyword: Search term, e.g. "artifact", "run", "failure", "log".
+
+    Example usage:
+        from metaflow_mcp_server.server import search_tool_schemas
+        for fn in search_tool_schemas('artifact'):
+            print(fn['name'], fn['signature'])
+            print(fn['docstring'][:200])
+    """
+    kw = keyword.lower()
+    return [
+        s for s in get_tool_schemas()
+        if kw in s["name"].lower() or kw in s["docstring"].lower()
+    ]
+
+
 def main():
     mcp.run(transport="stdio")
 

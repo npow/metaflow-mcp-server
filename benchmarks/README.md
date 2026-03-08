@@ -48,21 +48,21 @@ Correctness scored by a three-model judge ensemble (haiku + sonnet + opus), aver
 
 | Approach | Overall | Simple | Medium | Complex | Hard | Disambiguation |
 |----------|---------|--------|--------|---------|------|----------------|
-| MCP Direct | **0.98** | 1.00 | 0.94 | 0.99 | 1.00 | 1.00 |
-| Skill | **0.98** | 1.00 | 0.97 | 0.99 | 0.97 | 0.98 |
-| Search+Execute | 0.95 | 0.94 | 0.99 | 0.93 | 0.89 | 1.00 |
-| Code Mode | 0.88 | 0.86 | 0.89 | 0.88 | 0.83 | 0.94 |
+| MCP Direct | **0.96** | 1.00 | 0.92 | 0.98 | 0.93 | 0.99 |
+| Skill | **0.97** | 0.99 | 0.94 | 0.98 | 0.96 | 1.00 |
+| Search+Execute | **0.97** | 1.00 | 0.92 | 0.97 | 0.99 | 1.00 |
+| Code Mode | 0.90 | 0.88 | 0.92 | 0.95 | **0.71** | 0.96 |
 
-The gap between MCP approaches and Code Mode is statistically significant (Wilcoxon signed-rank, p<0.01).
+MCP approaches average 6–7 points above Code Mode overall, growing to 22–28 points on hard aggregation tasks. With n=22 tasks the effect is consistent across all model sizes but does not reach conventional significance thresholds (Wilcoxon p=0.10).
 
 ### Cost per task
 
 | Approach | Average | Haiku | Sonnet | Opus |
 |----------|---------|-------|--------|------|
-| Code Mode | $0.56 | $0.12 | $0.29 | $1.28 |
-| MCP Direct | $0.62 | $0.10 | $0.32 | $1.43 |
-| Skill | $0.64 | $0.11 | $0.30 | $1.50 |
-| Search+Execute | **$1.16** | $0.13 | $0.53 | $2.81 |
+| Code Mode | $0.71 | $0.20 | $0.32 | $1.59 |
+| Skill | $0.72 | $0.12 | $0.36 | $1.67 |
+| MCP Direct | $0.73 | $0.12 | $0.38 | $1.69 |
+| Search+Execute | **$1.37** | $0.29 | $0.60 | $3.23 |
 
 ## Running the benchmark
 

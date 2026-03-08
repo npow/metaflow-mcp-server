@@ -19,7 +19,8 @@ def _make_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(
         base_url=RELAY_BASE_URL,
         api_key=RELAY_API_KEY,
-        timeout=300.0,
+        timeout=600.0,
+        max_retries=0,  # don't retry on 504; record errors immediately
     )
 
 
@@ -55,7 +56,7 @@ def run_task(
             model=model_id,
             max_tokens=MAX_TOKENS,
             system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
+            messages=[{"role": "user", "content": approach.transform_user_prompt(user_prompt)}],
         )
 
         input_tokens = response.usage.input_tokens

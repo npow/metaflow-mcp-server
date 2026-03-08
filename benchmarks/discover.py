@@ -14,18 +14,25 @@ class TestContext:
     step_name: str = ""
     artifact_name: str = ""
     failed_flow_name: str = ""
+    # For disambiguation tasks: flow with controlled mix of success/failure states
+    status_flow_name: str = ""
 
 
-def discover_flows(min_runs: int = 3, max_flows: int = 5) -> list[dict]:
+def discover_flows(min_runs: int = 3, max_flows: int = 5, only_flows: list[str] | None = None) -> list[dict]:
     """Scan Metaflow() for flows with sufficient data for benchmarking.
 
     Returns list of dicts with keys: name, num_runs, has_failure, run_ids.
+
+    Args:
+        only_flows: if set, only consider flows whose names are in this list.
     """
     from metaflow import Metaflow, Flow
 
     results = []
     for flow_obj in Metaflow():
         flow_name = flow_obj.id
+        if only_flows and flow_name not in only_flows:
+            continue
         try:
             flow = Flow(flow_name)
         except Exception:
@@ -51,6 +58,19 @@ def discover_flows(min_runs: int = 3, max_flows: int = 5) -> list[dict]:
             break
 
     return results
+
+
+def discover_status_test_flow() -> str:
+    """Return 'StatusTestFlow' if it has >= 6 total runs (any state), else empty string."""
+    from metaflow import Flow
+    try:
+        flow = Flow("StatusTestFlow")
+        runs = list(flow)[:10]
+        if len(runs) >= 6:
+            return "StatusTestFlow"
+    except Exception:
+        pass
+    return ""
 
 
 def build_test_context(flows: list[dict]) -> TestContext:
@@ -97,5 +117,7 @@ def build_test_context(flows: list[dict]) -> TestContext:
             if ctx.artifact_name:
                 break
         break
+
+    ctx.status_flow_name = discover_status_test_flow()
 
     return ctx

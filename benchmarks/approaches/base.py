@@ -21,3 +21,7 @@ class Approach(ABC):
     def get_system_prompt(self) -> str:
         """Return the system prompt for this approach."""
         ...
+
+    def transform_user_prompt(self, prompt: str) -> str:
+        """Optionally transform the user prompt before sending to the relay."""
+        return prompt

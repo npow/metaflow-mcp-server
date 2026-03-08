@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "metaflow": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "metaflow_mcp_server"],
+      "env": {
+        "USERNAME": "npow"
+      }
+    }
+  }
+}

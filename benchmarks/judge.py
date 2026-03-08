@@ -1,6 +1,8 @@
 """LLM-as-judge correctness scoring via the claude-relay."""
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
 
@@ -84,52 +86,67 @@ def evaluate_results(
     verbose: bool = False,
     checkpoint_path: str | None = None,
     checkpoint_every: int = 50,
+    max_workers: int = 16,
 ) -> list[TaskResult]:
     """Run the judge on all results and populate correctness fields.
+
+    Judgments run in parallel (max_workers threads). Each judgment calls all
+    JUDGE_MODELS sequentially inside judge_answer, but multiple results are
+    judged concurrently, cutting total time by ~max_workers.
 
     Args:
         results: TaskResults with final_answer populated.
         questions: task_id -> original question.
         references: task_id -> reference answer string.
-        checkpoint_path: if set, save progress here every `checkpoint_every` items.
-            On the next call with the same checkpoint_path, already-scored items
-            (correctness_score is not None) are skipped, resuming from where it
-            left off.
-        checkpoint_every: how often to save a checkpoint (default: 50).
+        checkpoint_path: if set, save progress every `checkpoint_every` completions.
+        checkpoint_every: how often to checkpoint (default: 50).
+        max_workers: parallel judgment threads (default: 16).
 
     Returns the same results list with correctness_score/rationale filled in.
     """
-    for i, r in enumerate(results):
-        # Resume: skip items that already have a score (e.g. from a checkpoint)
-        if r.correctness_score is not None:
-            if verbose:
-                print(f"  Skipping {i+1}/{len(results)}: {r.approach}/{r.model}/{r.task_id} (already scored)")
-            continue
+    _lock = threading.Lock()
+    completed = [0]
 
+    # Pre-score errors (no API call needed)
+    pending = []
+    for r in results:
+        if r.correctness_score is not None:
+            continue
         if r.error:
             r.correctness_score = 0.0
             r.correctness_rationale = f"Skipped: {r.error}"
             continue
+        pending.append(r)
 
+    already_done = len(results) - len(pending)
+    if verbose and already_done:
+        print(f"  {already_done} already scored or errored, judging {len(pending)} remaining")
+
+    def _judge_one(r: TaskResult) -> None:
         question = questions.get(r.task_id, "")
         reference = references.get(r.task_id, "")
-
-        if verbose:
-            print(f"  Judging {i+1}/{len(results)}: {r.approach}/{r.model}/{r.task_id}...", flush=True)
-
         score, rationale = judge_answer(question, reference, r.final_answer)
         r.correctness_score = score
         r.correctness_rationale = rationale
 
-        if verbose:
-            print(f"    Score: {score} — {rationale[:80]}")
-
-        # Checkpoint: persist progress so a crash doesn't require re-judging from scratch
-        if checkpoint_path and (i + 1) % checkpoint_every == 0:
-            from dataclasses import asdict
-            from pathlib import Path
-            Path(checkpoint_path).write_text(json.dumps([asdict(r2) for r2 in results], indent=2, default=str))
+        with _lock:
+            completed[0] += 1
+            n = completed[0]
             if verbose:
-                print(f"  [checkpoint saved at {i+1}/{len(results)}]", flush=True)
+                tag = f"{r.approach}/{r.model}/{r.task_id}/t{r.trial}"
+                print(f"  [{n}/{len(pending)}] {tag}: {score} — {rationale[:60]}", flush=True)
+            if checkpoint_path and n % checkpoint_every == 0:
+                from dataclasses import asdict
+                from pathlib import Path
+                Path(checkpoint_path).write_text(
+                    json.dumps([asdict(r2) for r2 in results], indent=2, default=str)
+                )
+                if verbose:
+                    print(f"  [checkpoint at {n}/{len(pending)}]", flush=True)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_judge_one, r) for r in pending]
+        for f in as_completed(futures):
+            f.result()  # re-raise any exception
 
     return results
