@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/metaflow-mcp-server?v=2)](https://pypi.org/project/metaflow-mcp-server/)
 [![Python](https://img.shields.io/pypi/pyversions/metaflow-mcp-server?v=2)](https://pypi.org/project/metaflow-mcp-server/)
 [![License](https://img.shields.io/github/license/npow/metaflow-mcp-server?v=2)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-compatible-blue)](https://modelcontextprotocol.io/)
+[![MCP](https://img.shields.io/badge/MCP-compatible-blue)](https://modelcontextprotocol.io/) [![Docs](https://img.shields.io/badge/docs-mintlify-18a34a?style=flat-square)](https://mintlify.com/npow/metaflow-mcp-server)
 
 Give your coding agent superpowers over your Metaflow workflows. Instead of writing throwaway scripts to check run status or dig through logs, just ask -- your agent will figure out the rest.
 
