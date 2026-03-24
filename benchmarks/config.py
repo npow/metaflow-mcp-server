@@ -27,7 +27,7 @@ MAX_TOKENS = 16384
 
 # Judging — all three models judge every answer; final score = mean
 JUDGE_MODEL = "sonnet"  # kept for backward compat; multi-judge uses JUDGE_MODELS
-JUDGE_MODELS = ["haiku", "sonnet", "opus"]
+JUDGE_MODELS = ["sonnet", "opus"]
 
 
 def estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:

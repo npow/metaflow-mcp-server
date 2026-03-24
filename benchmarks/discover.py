@@ -16,6 +16,8 @@ class TestContext:
     failed_flow_name: str = ""
     # For disambiguation tasks: flow with controlled mix of success/failure states
     status_flow_name: str = ""
+    # Flows in scope for this benchmark run (from --only-flows, or all discovered)
+    only_flows: list = None
 
 
 def discover_flows(min_runs: int = 3, max_flows: int = 5, only_flows: list[str] | None = None) -> list[dict]:
@@ -84,8 +86,10 @@ def build_test_context(flows: list[dict]) -> TestContext:
     if not flows:
         return ctx
 
-    # Pick the flow with the most runs as primary
-    primary = max(flows, key=lambda f: f["num_runs"])
+    # Pick primary flow: prefer has_failure (more discriminating test data),
+    # then most runs, then name. StatusTestFlow has deliberate failures and
+    # a time.sleep(1) in the end step, making timing tasks unambiguous.
+    primary = max(flows, key=lambda f: (f["has_failure"], f["num_runs"], f["name"]))
     ctx.flow_name = primary["name"]
 
     # Find a failed flow (may be the same)
@@ -119,5 +123,6 @@ def build_test_context(flows: list[dict]) -> TestContext:
         break
 
     ctx.status_flow_name = discover_status_test_flow()
+    ctx.only_flows = [f["name"] for f in flows]
 
     return ctx

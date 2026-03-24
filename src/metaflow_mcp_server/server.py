@@ -79,7 +79,7 @@ def _duration(start, end):
     if start and end:
         s = _ensure_tz(start)
         e = _ensure_tz(end)
-        return round((e - s).total_seconds(), 1)
+        return round((e - s).total_seconds(), 2)
     return None
 
 
@@ -350,7 +350,7 @@ def get_task_logs(
 def list_artifacts(pathspec: str) -> str:
     """List all artifacts produced by a task (or the first task of a step).
 
-    Returns artifact names and metadata without loading data.
+    Returns artifact names, data types, and metadata.
     Use get_artifact to retrieve actual values.
 
     Args:
@@ -368,9 +368,14 @@ def list_artifacts(pathspec: str) -> str:
 
     artifacts = []
     for art in task:
+        try:
+            art_type = type(art.data).__name__
+        except Exception:
+            art_type = "unknown"
         artifacts.append(
             {
                 "name": art.id,
+                "type": art_type,
                 "sha": art.sha,
                 "created_at": str(art.created_at),
             }

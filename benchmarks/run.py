@@ -84,6 +84,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print detailed progress",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Max parallel workers (default: 4, to avoid relay 503s)",
+    )
     return parser.parse_args()
 
 
@@ -153,7 +159,7 @@ def main():
         # Rebuild task context to recover questions and references
         from metaflow import namespace as _ns
         _ns(None)
-        flows = discover_flows()
+        flows = discover_flows(only_flows=args.only_flows)
         ctx = build_test_context(flows)
         all_tasks = build_tasks(ctx)
         questions: dict[str, str] = {}
@@ -230,7 +236,9 @@ def main():
     # Phase 3: Run benchmarks in parallel (one thread per approach/model combo)
     approach_instances = {name: cls() for name, cls in APPROACHES.items() if name in args.approaches}
     num_workers = len(approach_instances) * len(args.models)
-    total_tasks = num_workers * len(runnable) * args.trials
+    if args.workers is not None:
+        num_workers = min(num_workers, args.workers)
+    total_tasks = len(approach_instances) * len(args.models) * len(runnable) * args.trials
     print(f"\nPhase 3: Running benchmarks ({num_workers} workers x {len(runnable)} tasks x {args.trials} trials = {total_tasks} total)...")
 
     results: list[TaskResult] = []

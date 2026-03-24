@@ -1,13 +1,13 @@
 # Benchmark: MCP Tools vs Code Generation
 
-Do LLMs perform better calling structured MCP tools, or writing code to call APIs? We tested four approaches against 22 Metaflow tasks of increasing complexity across three model sizes and three trials per cell (4 × 3 × 22 × 3 = 792 runs), scored by a three-model judge ensemble (haiku/sonnet/opus).
+Do LLMs perform better calling structured MCP tools, or writing code to call APIs? We tested four approaches against 27 Metaflow tasks of increasing complexity across three model sizes and three trials per cell (4 × 3 × 27 × 3 = 972 runs), scored by a two-judge ensemble (Sonnet + Opus).
 
 ## Approaches
 
 | Approach | How it works |
 |----------|-------------|
 | **MCP Direct** | Claude calls the 10 Metaflow MCP tools directly. Minimal system prompt. |
-| **Skill** | Identical to MCP Direct, but with a detailed Metaflow reference document prepended to every prompt. |
+| **Skill** | Identical to MCP Direct, but with a reference document prepended to every prompt. |
 | **Code Mode** | No MCP tools. Claude writes Python or Bash against the Metaflow client library. |
 | **Search+Execute** | No MCP tools. Inspired by [Cloudflare's search+execute pattern](https://blog.cloudflare.com/building-ai-agents-with-workers/). The model calls `search_tool_schemas(keyword)` to discover relevant API functions before writing code. |
 
@@ -33,6 +33,11 @@ Do LLMs perform better calling structured MCP tools, or writing code to call API
 | `hard_slowest_step` | hard | Slowest step across 2 recent runs |
 | `hard_artifact_timeline` | hard | Artifact value across 3 runs, oldest-first |
 | `hard_steps_per_flow` | hard | Which flow has the most steps? |
+| `hard_run_census` | hard | Count ALL runs by state |
+| `hard_fastest_run` | hard | Fastest of last 5 successful runs |
+| `hard_median_run_duration` | hard | Median duration of last 5 successful runs |
+| `hard_cross_flow_status` | hard | Status breakdown across multiple flows |
+| `hard_slowest_across_runs` | hard | Slowest (run, step) across 3 runs |
 | `disambig_count_run_states` | disambiguation | Count ALL runs by exact state |
 | `disambig_most_recent_state` | disambiguation | Classify the most recent run's state |
 | `disambig_unfinished_not_failed` | disambiguation | Count 5 recent runs by state |
@@ -42,27 +47,30 @@ Disambiguation tasks specifically test whether the model distinguishes between a
 
 ## Results
 
-Correctness scored by a three-model judge ensemble (haiku + sonnet + opus), averaged per result, on a 0.0–1.0 scale against ground truth computed directly from the Metaflow API. Each (approach, model, task) cell is run 3 times; scores are averaged across trials before computing statistics.
+Correctness scored by a two-judge ensemble (Sonnet + Opus), averaged per result, on a 0.0–1.0 scale against ground truth computed directly from the Metaflow API. Each (approach, model, task) cell is run 3 times; scores are averaged across trials before computing statistics.
 
 ### Accuracy by category (all models pooled)
 
 | Approach | Overall | Simple | Medium | Complex | Hard | Disambiguation |
 |----------|---------|--------|--------|---------|------|----------------|
-| MCP Direct | **0.96** | 1.00 | 0.92 | 0.98 | 0.93 | 0.99 |
-| Skill | **0.97** | 0.99 | 0.94 | 0.98 | 0.96 | 1.00 |
-| Search+Execute | **0.97** | 1.00 | 0.92 | 0.97 | 0.99 | 1.00 |
-| Code Mode | 0.90 | 0.88 | 0.92 | 0.95 | **0.71** | 0.96 |
+| MCP Direct | **1.00** | 1.00 | 1.00 | 0.99 | 0.99 | 1.00 |
+| Skill | 0.99 | 1.00 | 1.00 | 1.00 | 0.98 | 1.00 |
+| Search+Execute | 0.99 | 1.00 | 1.00 | 1.00 | 0.98 | 1.00 |
+| Code Mode | 0.97 | 0.86 | 1.00 | 0.95 | 0.98 | 1.00 |
 
-MCP approaches average 6–7 points above Code Mode overall, growing to 22–28 points on hard aggregation tasks. With n=22 tasks the effect is consistent across all model sizes but does not reach conventional significance thresholds (Wilcoxon p=0.10).
+Tool-based approaches cluster at 0.99+. Code Mode trails at 0.97, with the gap concentrated in Simple (config interpretation) and Complex (failure detection) tasks.
 
-### Cost per task
+MCP Direct vs Code Mode: consistent 2.7% gap (Wilcoxon p=0.107, n=27 tasks).
+MCP Direct vs Skill: tied on accuracy (p=0.68), but Skill costs 6–14% more tokens (p < 0.001).
 
-| Approach | Average | Haiku | Sonnet | Opus |
-|----------|---------|-------|--------|------|
-| Code Mode | $0.71 | $0.20 | $0.32 | $1.59 |
-| Skill | $0.72 | $0.12 | $0.36 | $1.67 |
-| MCP Direct | $0.73 | $0.12 | $0.38 | $1.69 |
-| Search+Execute | **$1.37** | $0.29 | $0.60 | $3.23 |
+### Token cost per task (mean)
+
+| Approach | Haiku | Sonnet | Opus |
+|----------|-------|--------|------|
+| MCP Direct | 1,022 | 668 | 433 |
+| Skill | 1,111 | 707 | 491 |
+| Code Mode | 1,716 | 562 | 482 |
+| Search+Execute | 1,362 | 719 | 839 |
 
 ## Running the benchmark
 
@@ -70,10 +78,11 @@ MCP approaches average 6–7 points above Code Mode overall, growing to 22–28 
 pip install -e ".[benchmark]"
 
 # Start claude-relay (required for subprocess Claude calls)
-cd ~/code/claude-relay && uv run agent-relay serve --port 8082
+pip install claude-relay
+CLAUDE_RELAY_CWD=/path/to/metaflow-mcp-server agent-relay serve --port 18082
 
-# Full benchmark (3 trials per cell, 3-model judge ensemble)
-python -m benchmarks --verbose
+# Full benchmark (3 trials per cell, 2-judge ensemble)
+RELAY_BASE_URL=http://localhost:18082 python -m benchmarks --verbose --only-flows StatusTestFlow DiagnoseFlow BenchmarkFlow
 
 # Quick test: one approach, one model, two tasks, one trial
 python -m benchmarks --approaches mcp_direct --models sonnet --tasks simple_config complex_success_rate --trials 1
@@ -82,4 +91,4 @@ python -m benchmarks --approaches mcp_direct --models sonnet --tasks simple_conf
 python -m benchmarks --judge-only benchmarks/results.raw.json
 ```
 
-Requires `claude-relay` on `http://localhost:8082` (override with `RELAY_BASE_URL`).
+Requires `claude-relay` on `http://localhost:18082` (override with `RELAY_BASE_URL`).

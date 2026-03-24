@@ -26,6 +26,13 @@ Score the candidate on a 5-level scale:
 Focus on factual correctness, not style. The candidate doesn't need to match \
 the reference format exactly — it needs to convey the same key information.
 
+Important rules:
+- Extra information or analysis in the candidate beyond the reference does NOT reduce \
+the score. Only penalize for wrong facts or missing key facts from the reference.
+- Timestamp differences of a few seconds due to rounding or display precision are NOT errors.
+- If all verifiable facts in the candidate match the reference, score 1.0 even if the \
+candidate includes additional unverifiable detail.
+
 Respond with ONLY a JSON object:
 {"score": <float>, "rationale": "<brief explanation>"}
 """
@@ -86,7 +93,7 @@ def evaluate_results(
     verbose: bool = False,
     checkpoint_path: str | None = None,
     checkpoint_every: int = 50,
-    max_workers: int = 16,
+    max_workers: int = 3,
 ) -> list[TaskResult]:
     """Run the judge on all results and populate correctness fields.
 

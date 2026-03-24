@@ -202,7 +202,7 @@ def _ref_medium_run_timing(ctx: TestContext) -> str:
                 if e.tzinfo is None:
                     from datetime import timezone
                     e = e.replace(tzinfo=timezone.utc)
-                dur = round((e - s).total_seconds(), 1)
+                dur = round((e - s).total_seconds(), 2)
             steps.append({
                 "step": step.id,
                 "task": task.id,
@@ -386,7 +386,7 @@ def _ref_hard_slowest_step(ctx: TestContext) -> str:
                         s = s.replace(tzinfo=timezone.utc)
                     if e.tzinfo is None:
                         e = e.replace(tzinfo=timezone.utc)
-                    dur = round((e - s).total_seconds(), 1)
+                    dur = round((e - s).total_seconds(), 2)
                 steps_with_dur.append({"step": step.id, "duration_seconds": dur})
                 break  # first task per step only
         # Sort: slowest first; break ties alphabetically by step name.
@@ -429,7 +429,7 @@ def _ref_hard_artifact_timeline(ctx: TestContext) -> str:
                     break
             if val is not None:
                 break
-        values.append({"run": run.pathspec, "value": val})
+        values.append({"run_id": run.id, "value": val})
     return json.dumps({
         "flow": ctx.flow_name,
         "artifact": ctx.artifact_name,
@@ -438,25 +438,24 @@ def _ref_hard_artifact_timeline(ctx: TestContext) -> str:
 
 
 def _ref_hard_steps_per_flow(ctx: TestContext) -> str:
-    """For each flow, count steps in its most recent run; report which has most."""
-    from metaflow import Metaflow, Flow
+    """For each benchmark flow, count steps in its most recent run; report which has most."""
+    from metaflow import Flow
+    flow_names = ctx.only_flows or []
     flows_data = []
-    for flow_obj in Metaflow():
+    for flow_name in flow_names:
         try:
-            flow = Flow(flow_obj.id)
+            flow = Flow(flow_name)
             run = next(iter(flow), None)
             if run is None:
                 continue
             steps = list(run)
             flows_data.append({
-                "flow": flow_obj.id,
-                "run": run.pathspec,
+                "flow": flow_name,
                 "step_count": len(steps),
                 "steps": [s.id for s in steps],
             })
         except Exception:
             continue
-        # no limit — include all flows
     most_steps_flow = max(flows_data, key=lambda x: x["step_count"])["flow"] if flows_data else None
     return json.dumps({
         "flows": flows_data,
@@ -464,8 +463,183 @@ def _ref_hard_steps_per_flow(ctx: TestContext) -> str:
     }, default=str)
 
 
+def _ref_hard_run_census(ctx: TestContext) -> str:
+    """Count ALL runs by state — traps models that use search_runs default (last_n=5)."""
+    from metaflow import Flow
+    flow = Flow(ctx.flow_name)
+    total, successful, unfinished, failed = 0, 0, 0, 0
+    for run in flow:
+        total += 1
+        if run.finished and run.successful:
+            successful += 1
+        elif run.finished and not run.successful:
+            failed += 1
+        else:
+            unfinished += 1
+        if total >= 200:
+            break
+    return json.dumps({
+        "flow": ctx.flow_name,
+        "total_runs": total,
+        "finished_successful": successful,
+        "finished_failed": failed,
+        "unfinished": unfinished,
+    })
+
+
+def _ref_hard_fastest_run(ctx: TestContext) -> str:
+    """Fastest run (shortest total wall-clock) among last 5 successful — requires 5 get_run calls."""
+    from metaflow import Flow
+    from datetime import timezone
+    flow = Flow(ctx.flow_name)
+    runs = []
+    for run in flow:
+        if not (run.finished and run.successful):
+            continue
+        dur = None
+        if run.created_at and run.finished_at:
+            s = run.created_at
+            e = run.finished_at
+            if s.tzinfo is None:
+                s = s.replace(tzinfo=timezone.utc)
+            if e.tzinfo is None:
+                e = e.replace(tzinfo=timezone.utc)
+            dur = round((e - s).total_seconds(), 2)
+        runs.append({"run_id": run.id, "duration_seconds": dur})
+        if len(runs) >= 5:
+            break
+    if not runs:
+        return json.dumps({"error": "no successful runs found"})
+    valid = [r for r in runs if r["duration_seconds"] is not None]
+    if not valid:
+        return json.dumps({"error": "no timing data"})
+    fastest = min(valid, key=lambda r: r["duration_seconds"])
+    return json.dumps({
+        "flow": ctx.flow_name,
+        "fastest_run_id": fastest["run_id"],
+        "fastest_duration_seconds": fastest["duration_seconds"],
+        "all_runs": runs,
+    })
+
+
+def _ref_hard_median_run_duration(ctx: TestContext) -> str:
+    """Median total wall-clock duration across last 5 successful runs — requires computation."""
+    import statistics
+    from metaflow import Flow
+    from datetime import timezone
+    flow = Flow(ctx.flow_name)
+    durations = []
+    count = 0
+    for run in flow:
+        if not (run.finished and run.successful):
+            continue
+        if run.created_at and run.finished_at:
+            s = run.created_at
+            e = run.finished_at
+            if s.tzinfo is None:
+                s = s.replace(tzinfo=timezone.utc)
+            if e.tzinfo is None:
+                e = e.replace(tzinfo=timezone.utc)
+            durations.append(round((e - s).total_seconds(), 2))
+        count += 1
+        if count >= 5:
+            break
+    if len(durations) < 2:
+        return json.dumps({"error": "insufficient data"})
+    return json.dumps({
+        "flow": ctx.flow_name,
+        "runs_sampled": len(durations),
+        "individual_durations_seconds": durations,
+        "median_duration_seconds": round(statistics.median(durations), 2),
+    })
+
+
+def _ref_hard_cross_flow_status(ctx: TestContext) -> str:
+    """For each benchmark flow, count runs by state: successful, failed, running/unfinished.
+
+    MCP advantage: search_runs with status filter handles the finished/successful
+    logic correctly. Code models must implement the three-way classification
+    for each flow — the exact logic that trips up code generation.
+    """
+    from metaflow import Flow
+    flow_names = ctx.only_flows or []
+    results = []
+    for flow_name in flow_names:
+        try:
+            flow = Flow(flow_name)
+            successful, failed, unfinished = 0, 0, 0
+            total = 0
+            for run in flow:
+                total += 1
+                if total > 20:
+                    break
+                if run.finished and run.successful:
+                    successful += 1
+                elif run.finished and not run.successful:
+                    failed += 1
+                else:
+                    unfinished += 1
+            results.append({
+                "flow": flow_name,
+                "total_runs": total,
+                "successful": successful,
+                "failed": failed,
+                "unfinished": unfinished,
+            })
+        except Exception:
+            continue
+    return json.dumps({"flows": results}, default=str)
+
+
+def _ref_hard_slowest_across_runs(ctx: TestContext) -> str:
+    """Across the last 3 finished runs, which (run, step) combo was the absolute slowest?
+
+    MCP advantage: get_run returns pre-computed duration_seconds. Code models
+    must compute durations for 3 runs × N steps, handle timezone, then find
+    the global maximum. Off-by-one in timezone or None handling → wrong answer.
+    """
+    from metaflow import Flow
+    from datetime import timezone
+    flow = Flow(ctx.flow_name)
+    all_entries = []
+    run_count = 0
+    for run in flow:
+        if not run.finished:
+            continue
+        run_count += 1
+        if run_count > 3:
+            break
+        for step in run:
+            for task in step:
+                dur = None
+                if task.created_at and task.finished_at:
+                    s = task.created_at
+                    e = task.finished_at
+                    if s.tzinfo is None:
+                        s = s.replace(tzinfo=timezone.utc)
+                    if e.tzinfo is None:
+                        e = e.replace(tzinfo=timezone.utc)
+                    dur = round((e - s).total_seconds(), 2)
+                all_entries.append({
+                    "run": run.pathspec,
+                    "step": step.id,
+                    "duration_seconds": dur,
+                })
+                break  # first task per step
+    valid = [e for e in all_entries if e["duration_seconds"] is not None]
+    if not valid:
+        return json.dumps({"error": "no timing data"})
+    slowest = max(valid, key=lambda e: e["duration_seconds"])
+    return json.dumps({
+        "flow": ctx.flow_name,
+        "runs_examined": run_count,
+        "all_step_durations": all_entries,
+        "slowest_overall": slowest,
+    }, default=str)
+
+
 def build_tasks(ctx: TestContext) -> list[BenchmarkTask]:
-    """Build the 10 benchmark tasks, parameterized by discovered test context."""
+    """Build the benchmark tasks, parameterized by discovered test context."""
     tasks = [
         BenchmarkTask(
             id="simple_config",
@@ -599,9 +773,10 @@ def build_tasks(ctx: TestContext) -> list[BenchmarkTask]:
             id="hard_steps_per_flow",
             category="hard",
             prompt_template=(
-                "For each available Metaflow flow, retrieve its most recent run and count "
-                "how many steps it has. Report each flow's name, step count, and step names. "
-                "Which flow has the most steps?"
+                "For each of these Metaflow flows: {only_flows}, retrieve its most recent run "
+                "and count how many steps it has. Report each flow's name, step count, and step names. "
+                "Which flow has the most steps? "
+                "Only look at the flows listed above — do not retrieve data for any other flows."
             ),
             reference_fn=_ref_hard_steps_per_flow,
         ),
@@ -665,6 +840,70 @@ def build_tasks(ctx: TestContext) -> list[BenchmarkTask]:
             reference_fn=_ref_disambig_success_rate_finished_only,
             skip_reason=None if ctx.status_flow_name else "StatusTestFlow not found — run setup_test_data.py",
         ),
+        # --- Discriminating tasks (designed to separate MCP Direct from Skill) ---
+        # These tasks require either (a) using search_runs with non-default last_n,
+        # or (b) aggregating results across multiple tool calls without guidance from SKILL.md.
+        BenchmarkTask(
+            id="hard_run_census",
+            category="hard",
+            prompt_template=(
+                "How many total runs does the flow '{flow_name}' have? "
+                "Count every run visible in the current namespace — not just the most recent ones. "
+                "Report the total and break it down by state: "
+                "finished-successful, finished-failed, and unfinished (still running or killed)."
+            ),
+            reference_fn=_ref_hard_run_census,
+            skip_reason=None if ctx.flow_name else "no flow discovered",
+        ),
+        BenchmarkTask(
+            id="hard_fastest_run",
+            category="hard",
+            prompt_template=(
+                "Among the last 5 successful runs of '{flow_name}', which one completed "
+                "in the shortest total wall-clock time? "
+                "Report the run pathspec and its duration in seconds. "
+                "Also show each of the 5 runs with their individual durations."
+            ),
+            reference_fn=_ref_hard_fastest_run,
+            skip_reason=None if ctx.flow_name else "no flow discovered",
+        ),
+        BenchmarkTask(
+            id="hard_median_run_duration",
+            category="hard",
+            prompt_template=(
+                "Compute the median total wall-clock duration (in seconds) across "
+                "the last 5 successful runs of '{flow_name}'. "
+                "Show each run's individual duration and the computed median."
+            ),
+            reference_fn=_ref_hard_median_run_duration,
+            skip_reason=None if ctx.flow_name else "no flow discovered",
+        ),
+        # --- MCP-advantage tasks (encode logic that code models botch) ---
+        BenchmarkTask(
+            id="hard_cross_flow_status",
+            category="hard",
+            prompt_template=(
+                "For each of these flows: {only_flows}, examine up to 20 runs and classify each run "
+                "into exactly three states: finished-successfully (finished=True AND successful=True), "
+                "finished-with-failure (finished=True AND successful=False), or "
+                "unfinished/running (finished=False). "
+                "Report the count for each state per flow. "
+                "Only look at the flows listed above — do not retrieve data for any other flows."
+            ),
+            reference_fn=_ref_hard_cross_flow_status,
+        ),
+        BenchmarkTask(
+            id="hard_slowest_across_runs",
+            category="hard",
+            prompt_template=(
+                "Look at the last 3 finished runs of '{flow_name}'. For every step in each run, "
+                "compute the first task's duration in seconds. "
+                "Then find the single slowest (run, step) combination across all 3 runs. "
+                "Report: all step durations for each run, and which (run, step) was the absolute slowest."
+            ),
+            reference_fn=_ref_hard_slowest_across_runs,
+            skip_reason=None if ctx.flow_name else "no flow discovered",
+        ),
     ]
     return tasks
 
@@ -679,4 +918,5 @@ def render_prompt(task: BenchmarkTask, ctx: TestContext) -> str:
         artifact=ctx.artifact_name,
         failed_flow=ctx.failed_flow_name,
         status_flow=ctx.status_flow_name,
+        only_flows=", ".join(ctx.only_flows) if ctx.only_flows else "all flows",
     )
