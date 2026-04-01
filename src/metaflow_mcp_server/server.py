@@ -97,6 +97,101 @@ def _filter_log(text, head=None, tail=None, pattern=None):
     return "".join(lines)
 
 
+def _extract_text_from_html(html: str) -> str:
+    """Extract visible text content from HTML, stripping tags and scripts."""
+    from html.parser import HTMLParser
+
+    class _TextExtractor(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self._pieces: list[str] = []
+            self._skip = False
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style"):
+                self._skip = True
+
+        def handle_endtag(self, tag):
+            if tag in ("script", "style"):
+                self._skip = False
+
+        def handle_data(self, data):
+            if not self._skip:
+                text = data.strip()
+                if text:
+                    self._pieces.append(text)
+
+    extractor = _TextExtractor()
+    extractor.feed(html)
+    return "\n".join(extractor._pieces)
+
+
+def _resolve_tasks_for_cards(pathspec: str):
+    """Resolve a run/step/task pathspec to a list of (Task, label) pairs for card lookup."""
+    from metaflow import Run, Step, Task
+
+    parts = pathspec.split("/")
+    if len(parts) == 4:
+        task = Task(pathspec)
+        return [(task, task.pathspec)]
+    elif len(parts) == 3:
+        step = Step(pathspec)
+        task = next(iter(step))
+        return [(task, task.pathspec)]
+    elif len(parts) == 2:
+        run = Run(pathspec)
+        tasks = []
+        for step in run:
+            for task in step:
+                tasks.append((task, task.pathspec))
+                break  # first task per step only
+        return tasks
+    else:
+        raise ValueError(
+            f"Invalid pathspec '{pathspec}': expected FlowName/RunID, "
+            "FlowName/RunID/StepName, or FlowName/RunID/StepName/TaskID"
+        )
+
+
+def _build_comparison_html(entries: list[dict]) -> str:
+    """Build a side-by-side HTML comparison page from card entries."""
+    import html as html_module
+
+    n = len(entries)
+    iframe_blocks = []
+    for entry in entries:
+        escaped = html_module.escape(entry["html"], quote=True)
+        label = html_module.escape(entry["task"])
+        card_type = html_module.escape(entry.get("card_type") or "unknown")
+        iframe_blocks.append(
+            f'<div class="card-col">'
+            f'<div class="card-label">{label} ({card_type})</div>'
+            f'<iframe srcdoc="{escaped}" sandbox="allow-scripts allow-same-origin"></iframe>'
+            f"</div>"
+        )
+
+    return (
+        "<!DOCTYPE html>\n<html>\n<head>\n"
+        '<meta charset="utf-8">\n'
+        "<title>Metaflow Card Comparison</title>\n"
+        "<style>\n"
+        "* { margin: 0; padding: 0; box-sizing: border-box; }\n"
+        "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; }\n"
+        "h1 { padding: 16px 24px; background: #1a1a2e; color: white; font-size: 18px; }\n"
+        ".container { display: flex; gap: 8px; padding: 8px; height: calc(100vh - 56px); }\n"
+        ".card-col { flex: 1; min-width: 400px; display: flex; flex-direction: column; }\n"
+        ".card-label { background: #2d2d44; color: white; padding: 8px 12px; font-size: 13px;\n"
+        "             border-radius: 6px 6px 0 0; font-family: monospace; }\n"
+        "iframe { flex: 1; border: 1px solid #ddd; border-top: none; border-radius: 0 0 6px 6px;\n"
+        "         background: white; width: 100%; }\n"
+        "</style>\n</head>\n<body>\n"
+        f"<h1>Metaflow Card Comparison ({n} cards)</h1>\n"
+        '<div class="container">\n'
+        + "\n".join(iframe_blocks)
+        + "\n</div>\n</body>\n</html>"
+    )
+
+
 # ── Configuration ─────────────────────────────────────────────
 
 
@@ -407,6 +502,245 @@ def get_artifact(pathspec: str, name: str) -> str:
     )
 
 
+# ── Card Inspection ───────────────────────────────────────────
+
+
+@mcp.tool()
+@_handle_errors
+def list_cards(
+    pathspec: str,
+    card_type: str | None = None,
+    card_id: str | None = None,
+) -> str:
+    """List cards attached to a run, step, or task.
+
+    Cards are visual reports (HTML) produced by Metaflow steps, often
+    containing plots, tables, and metrics. Use this to discover available
+    cards before retrieving them with get_card.
+
+    For a run pathspec, scans all steps (first task per step).
+    For a step pathspec, uses the first task.
+    For a task pathspec, uses that exact task.
+
+    Args:
+        pathspec: Run ("FlowName/RunID"), step ("FlowName/RunID/StepName"),
+                  or task ("FlowName/RunID/StepName/TaskID") pathspec.
+        card_type: Only list cards of this type (e.g. "default").
+        card_id: Only list cards with this ID.
+    """
+    from metaflow.cards import get_cards
+
+    tasks = _resolve_tasks_for_cards(pathspec)
+    all_cards = []
+    for task, label in tasks:
+        cards = get_cards(task, id=card_id, type=card_type)
+        for card in cards:
+            all_cards.append(
+                {
+                    "task": label,
+                    "type": card.type,
+                    "id": card.id,
+                    "hash": card.hash,
+                }
+            )
+
+    return _json(
+        {
+            "pathspec": pathspec,
+            "card_count": len(all_cards),
+            "cards": all_cards,
+        }
+    )
+
+
+@mcp.tool()
+@_handle_errors
+def get_card(
+    pathspec: str,
+    card_index: int = 0,
+    card_type: str | None = None,
+    card_id: str | None = None,
+) -> str:
+    """Get a Metaflow card's content and save it as a viewable HTML file.
+
+    Retrieves the card HTML from the datastore, saves it to a temp file
+    you can open in your browser, and returns extracted text content for
+    analysis.
+
+    Use list_cards first to discover available cards.
+
+    Args:
+        pathspec: Step ("FlowName/RunID/StepName") or task
+                  ("FlowName/RunID/StepName/TaskID") pathspec.
+        card_index: Which card to retrieve if multiple exist (default 0).
+        card_type: Filter cards by type before selecting by index.
+        card_id: Filter cards by ID before selecting by index.
+    """
+    import tempfile
+
+    from metaflow.cards import get_cards
+
+    tasks = _resolve_tasks_for_cards(pathspec)
+    if not tasks:
+        return _json({"error": f"No tasks found for pathspec '{pathspec}'"})
+
+    task, label = tasks[0]
+    cards = get_cards(task, id=card_id, type=card_type)
+
+    if len(cards) == 0:
+        return _json({"error": "No cards found", "pathspec": pathspec, "task": label})
+
+    if card_index >= len(cards):
+        return _json(
+            {
+                "error": f"Card index {card_index} out of range (found {len(cards)} cards)",
+                "pathspec": pathspec,
+                "task": label,
+            }
+        )
+
+    card = cards[card_index]
+    html = card.get()
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False, prefix="metaflow_card_"
+    ) as f:
+        f.write(html)
+        file_path = f.name
+
+    text_content = _extract_text_from_html(html)
+    max_text_len = 10_000
+    if len(text_content) > max_text_len:
+        text_content = text_content[:max_text_len] + "\n... (truncated)"
+
+    return _json(
+        {
+            "pathspec": pathspec,
+            "task": label,
+            "card_type": card.type,
+            "card_id": card.id,
+            "card_hash": card.hash,
+            "html_file": file_path,
+            "html_size_bytes": len(html),
+            "text_content": text_content,
+        }
+    )
+
+
+@mcp.tool()
+@_handle_errors
+def compare_cards(
+    pathspecs: list[str] | None = None,
+    flow_name: str | None = None,
+    step_name: str | None = None,
+    run_ids: list[str] | None = None,
+    card_type: str | None = None,
+    card_id: str | None = None,
+    card_index: int = 0,
+) -> str:
+    """Compare Metaflow cards across multiple runs side by side.
+
+    Creates an HTML comparison page and saves it to a temp file you can
+    open in your browser. Also returns text summaries of each card for
+    analysis.
+
+    Two ways to specify which cards to compare:
+
+    Option A -- provide a list of step/task pathspecs directly:
+        pathspecs=["MyFlow/100/validate", "MyFlow/101/validate"]
+
+    Option B -- provide flow_name + step_name + run_ids (shorthand):
+        flow_name="MyFlow", step_name="validate", run_ids=["100", "101"]
+        Resolves each to "MyFlow/{run_id}/{step_name}" (first task).
+
+    Args:
+        pathspecs: List of step or task pathspecs to compare.
+        flow_name: Flow name (used with step_name + run_ids).
+        step_name: Step name (used with flow_name + run_ids).
+        run_ids: List of run IDs to compare (used with flow_name + step_name).
+        card_type: Filter cards by type before selecting.
+        card_id: Filter cards by ID before selecting.
+        card_index: Which card to use if multiple match (default 0).
+    """
+    import tempfile
+
+    from metaflow.cards import get_cards
+
+    if pathspecs:
+        resolved = pathspecs
+    elif flow_name and step_name and run_ids:
+        resolved = [f"{flow_name}/{rid}/{step_name}" for rid in run_ids]
+    else:
+        return _json(
+            {"error": "Provide either 'pathspecs' or all of 'flow_name', 'step_name', and 'run_ids'."}
+        )
+
+    if len(resolved) < 2:
+        return _json({"error": "Need at least 2 pathspecs to compare."})
+
+    entries = []
+    errors = []
+    for spec in resolved:
+        try:
+            tasks = _resolve_tasks_for_cards(spec)
+            if not tasks:
+                errors.append({"pathspec": spec, "error": "No tasks found"})
+                continue
+            task, label = tasks[0]
+            cards = get_cards(task, id=card_id, type=card_type)
+            if len(cards) == 0:
+                errors.append({"pathspec": spec, "error": "No cards found"})
+                continue
+            idx = min(card_index, len(cards) - 1)
+            card = cards[idx]
+            html = card.get()
+            entries.append(
+                {
+                    "pathspec": spec,
+                    "task": label,
+                    "card_type": card.type,
+                    "card_id": card.id,
+                    "html": html,
+                }
+            )
+        except Exception as e:
+            errors.append({"pathspec": spec, "error": str(e)})
+
+    if not entries:
+        return _json({"error": "No cards could be loaded", "details": errors})
+
+    comparison_html = _build_comparison_html(entries)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False, prefix="metaflow_compare_"
+    ) as f:
+        f.write(comparison_html)
+        file_path = f.name
+
+    summaries = []
+    for entry in entries:
+        text = _extract_text_from_html(entry["html"])
+        if len(text) > 3000:
+            text = text[:3000] + "\n... (truncated)"
+        summaries.append(
+            {
+                "pathspec": entry["pathspec"],
+                "task": entry["task"],
+                "card_type": entry["card_type"],
+                "text_content": text,
+            }
+        )
+
+    return _json(
+        {
+            "comparison_file": file_path,
+            "cards_compared": len(entries),
+            "summaries": summaries,
+            "errors": errors if errors else None,
+        }
+    )
+
+
 # ── Compound Operations ──────────────────────────────────────
 
 
@@ -711,9 +1045,13 @@ def get_tool_schemas() -> list[dict]:
         get_task_logs,
         list_artifacts,
         get_artifact,
+        list_cards,
+        get_card,
+        compare_cards,
         get_latest_failure,
         search_artifacts,
         get_recent_runs,
+        get_source_code,
     ]
     schemas = []
     for fn in tool_fns:

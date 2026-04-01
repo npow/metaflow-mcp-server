@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from metaflow_mcp_server.server import mcp, _filter_log, _parse_dt, _ensure_tz, _duration
+from metaflow_mcp_server.server import mcp, _filter_log, _parse_dt, _ensure_tz, _duration, _extract_text_from_html
 
 INTEGRATION = os.environ.get("METAFLOW_MCP_INTEGRATION") == "1"
 
@@ -45,6 +45,9 @@ class TestToolRegistration:
             "get_task_logs",
             "list_artifacts",
             "get_artifact",
+            "list_cards",
+            "get_card",
+            "compare_cards",
             "get_latest_failure",
             "search_artifacts",
             "get_recent_runs",
@@ -105,6 +108,35 @@ class TestToolRegistration:
         props = tool.inputSchema["properties"]
         assert "flow_name" in props
         assert "last_n_runs" in props
+
+    def test_list_cards_has_params(self):
+        tools = asyncio.get_event_loop().run_until_complete(mcp.list_tools())
+        tool = next(t for t in tools if t.name == "list_cards")
+        props = tool.inputSchema["properties"]
+        assert "pathspec" in props
+        assert "card_type" in props
+        assert "card_id" in props
+
+    def test_get_card_has_params(self):
+        tools = asyncio.get_event_loop().run_until_complete(mcp.list_tools())
+        tool = next(t for t in tools if t.name == "get_card")
+        props = tool.inputSchema["properties"]
+        assert "pathspec" in props
+        assert "card_index" in props
+        assert "card_type" in props
+        assert "card_id" in props
+
+    def test_compare_cards_has_params(self):
+        tools = asyncio.get_event_loop().run_until_complete(mcp.list_tools())
+        tool = next(t for t in tools if t.name == "compare_cards")
+        props = tool.inputSchema["properties"]
+        assert "pathspecs" in props
+        assert "flow_name" in props
+        assert "step_name" in props
+        assert "run_ids" in props
+        assert "card_type" in props
+        assert "card_id" in props
+        assert "card_index" in props
 
 
 class TestHelpers:
@@ -189,6 +221,23 @@ class TestHelpers:
         from datetime import datetime
         assert _duration(datetime(2024, 1, 1), None) is None
 
+    def test_extract_text_basic(self):
+        html = "<html><body><h1>Title</h1><p>Hello world</p></body></html>"
+        result = _extract_text_from_html(html)
+        assert "Title" in result
+        assert "Hello world" in result
+
+    def test_extract_text_strips_script_and_style(self):
+        html = "<p>visible</p><script>var x = 1;</script><style>.foo{}</style><p>also visible</p>"
+        result = _extract_text_from_html(html)
+        assert "visible" in result
+        assert "also visible" in result
+        assert "var x" not in result
+        assert ".foo" not in result
+
+    def test_extract_text_empty(self):
+        assert _extract_text_from_html("") == ""
+
 
 class TestErrorHandling:
     """Tools should return structured errors, not crash."""
@@ -217,6 +266,22 @@ class TestErrorHandling:
             "search_artifacts",
             {"flow_name": "NonExistent__12345", "artifact_name": "x"},
         )
+        assert "error" in result
+
+    def test_list_cards_bad_pathspec(self, run_tool):
+        result = run_tool("list_cards", {"pathspec": "FakeFlow/99999999"})
+        assert "error" in result
+
+    def test_get_card_bad_pathspec(self, run_tool):
+        result = run_tool("get_card", {"pathspec": "FakeFlow/99999999/step"})
+        assert "error" in result
+
+    def test_compare_cards_missing_args(self, run_tool):
+        result = run_tool("compare_cards", {})
+        assert "error" in result
+
+    def test_compare_cards_too_few(self, run_tool):
+        result = run_tool("compare_cards", {"pathspecs": ["MyFlow/1/step/0"]})
         assert "error" in result
 
 
