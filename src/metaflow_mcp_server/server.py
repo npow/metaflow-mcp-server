@@ -561,11 +561,11 @@ def get_card(
     card_type: str | None = None,
     card_id: str | None = None,
 ) -> str:
-    """Get a Metaflow card's content and save it as a viewable HTML file.
+    """Get a Metaflow card's content as HTML.
 
-    Retrieves the card HTML from the datastore, saves it to a temp file
-    you can open in your browser, and returns extracted text content for
-    analysis.
+    Retrieves the card HTML from the datastore and returns it along with
+    extracted text content for analysis. Save the html field to a local
+    .html file and open it in your browser to view the card visually.
 
     Use list_cards first to discover available cards.
 
@@ -576,8 +576,6 @@ def get_card(
         card_type: Filter cards by type before selecting by index.
         card_id: Filter cards by ID before selecting by index.
     """
-    import tempfile
-
     from metaflow.cards import get_cards
 
     tasks = _resolve_tasks_for_cards(pathspec)
@@ -602,12 +600,6 @@ def get_card(
     card = cards[card_index]
     html = card.get()
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".html", delete=False, prefix="metaflow_card_"
-    ) as f:
-        f.write(html)
-        file_path = f.name
-
     text_content = _extract_text_from_html(html)
     max_text_len = 10_000
     if len(text_content) > max_text_len:
@@ -620,8 +612,7 @@ def get_card(
             "card_type": card.type,
             "card_id": card.id,
             "card_hash": card.hash,
-            "html_file": file_path,
-            "html_size_bytes": len(html),
+            "html": html,
             "text_content": text_content,
         }
     )
@@ -640,9 +631,9 @@ def compare_cards(
 ) -> str:
     """Compare Metaflow cards across multiple runs side by side.
 
-    Creates an HTML comparison page and saves it to a temp file you can
-    open in your browser. Also returns text summaries of each card for
-    analysis.
+    Creates an HTML comparison page and returns it. Save the html field
+    to a local .html file and open it in your browser to view the cards
+    side by side. Also returns text summaries of each card for analysis.
 
     Two ways to specify which cards to compare:
 
@@ -662,8 +653,6 @@ def compare_cards(
         card_id: Filter cards by ID before selecting.
         card_index: Which card to use if multiple match (default 0).
     """
-    import tempfile
-
     from metaflow.cards import get_cards
 
     if pathspecs:
@@ -711,12 +700,6 @@ def compare_cards(
 
     comparison_html = _build_comparison_html(entries)
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".html", delete=False, prefix="metaflow_compare_"
-    ) as f:
-        f.write(comparison_html)
-        file_path = f.name
-
     summaries = []
     for entry in entries:
         text = _extract_text_from_html(entry["html"])
@@ -733,7 +716,7 @@ def compare_cards(
 
     return _json(
         {
-            "comparison_file": file_path,
+            "html": comparison_html,
             "cards_compared": len(entries),
             "summaries": summaries,
             "errors": errors if errors else None,
