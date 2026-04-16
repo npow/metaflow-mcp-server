@@ -243,7 +243,7 @@ def get_config() -> str:
 
 @mcp.tool()
 @_handle_errors
-def list_flows(last_n: int = 50, namespace: str | None = None) -> str:
+def list_flows(last_n: int = 50, offset: int = 0, namespace: str | None = None) -> str:
     """List available Metaflow flows.
 
     Returns flow names visible in the given namespace.
@@ -251,6 +251,7 @@ def list_flows(last_n: int = 50, namespace: str | None = None) -> str:
 
     Args:
         last_n: Max number of flows to return (default 50).
+        offset: Number of flows to skip for pagination (default 0).
         namespace: Metaflow namespace to scope results (e.g. "user:npow").
                    Use get_config to find your default_namespace.
                    If omitted, returns all flows visible globally.
@@ -261,11 +262,24 @@ def list_flows(last_n: int = 50, namespace: str | None = None) -> str:
         mf.namespace(namespace)
     try:
         flows = []
+        skipped = 0
+        has_more = False
         for flow in mf.Metaflow():
+            if skipped < offset:
+                skipped += 1
+                continue
             if len(flows) >= last_n:
+                has_more = True
                 break
             flows.append(flow.id)
-        return _json({"flows": flows, "count": len(flows), "namespace": namespace or "global"})
+        result = {
+            "flows": flows,
+            "count": len(flows),
+            "offset": offset,
+            "has_more": has_more,
+            "namespace": namespace or "global",
+        }
+        return _json(result)
     finally:
         if namespace:
             mf.namespace(None)  # restore global namespace

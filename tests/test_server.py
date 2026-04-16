@@ -92,6 +92,7 @@ class TestToolRegistration:
         tool = next(t for t in tools if t.name == "list_flows")
         props = tool.inputSchema["properties"]
         assert "last_n" in props
+        assert "offset" in props
 
     def test_search_artifacts_has_params(self):
         tools = asyncio.get_event_loop().run_until_complete(mcp.list_tools())
@@ -261,6 +262,11 @@ class TestErrorHandling:
         result = run_tool("list_flows", {"last_n": 1})
         assert "flows" in result or "error" in result
 
+    def test_list_flows_pagination_fields(self, run_tool):
+        result = run_tool("list_flows", {"last_n": 1, "offset": 0})
+        assert "offset" in result
+        assert "has_more" in result
+
     def test_bad_search_artifacts(self, run_tool):
         result = run_tool(
             "search_artifacts",
@@ -298,6 +304,20 @@ class TestIntegration:
         result = run_tool("list_flows", {"last_n": 5})
         assert "flows" in result
         assert "count" in result
+        assert "has_more" in result
+        assert "offset" in result
+
+    def test_list_flows_pagination(self, run_tool):
+        # Get first page
+        page1 = run_tool("list_flows", {"last_n": 2, "offset": 0})
+        assert page1["count"] <= 2
+        assert page1["offset"] == 0
+        if page1["has_more"]:
+            # Get second page
+            page2 = run_tool("list_flows", {"last_n": 2, "offset": 2})
+            assert page2["offset"] == 2
+            # Pages should not overlap
+            assert set(page1["flows"]).isdisjoint(set(page2["flows"]))
 
     def test_search_and_drill(self, run_tool):
         # Find any flow with runs
