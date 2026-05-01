@@ -600,20 +600,20 @@ wheels = [
 
 [[package]]
 name = "metaflow"
-version = "2.19.20"
+version = "2.19.23"
 source = { registry = "https://pypi.netflix.net/simple" }
 dependencies = [
     { name = "boto3" },
     { name = "requests" },
 ]
-sdist = { url = "https://pypi.netflix.net/packages/19966073681/metaflow-2.19.20.tar.gz", hash = "sha256:632a2fd42d2d36b6ea8cbebc8f315ec8735e3cb0bf2894f80e8484fadc623aa5", size = 1569733, upload-time = "2026-02-26T22:00:14.256Z" }
+sdist = { url = "https://pypi.netflix.net/packages/20871211396/metaflow-2.19.23.tar.gz", hash = "sha256:71dce211c79d6d328d4d0ae8ee7eeee7e1f1eca2bb3b1dd12054f03ce7c30195", size = 1590897, upload-time = "2026-04-28T04:07:07.831Z" }
 wheels = [
-    { url = "https://pypi.netflix.net/packages/19966073680/metaflow-2.19.20-py2.py3-none-any.whl", hash = "sha256:8734903f8f1927d518091083c5293ccaab22647ded012f4b03fda74b8dce54d7", size = 1752627, upload-time = "2026-02-26T22:00:12.698Z" },
+    { url = "https://pypi.netflix.net/packages/20871211395/metaflow-2.19.23-py2.py3-none-any.whl", hash = "sha256:c91182adbdc2bb0079bc0ac1a5f8f57a1ceb2b3c2fac63da4369988a82cbd14b", size = 1784662, upload-time = "2026-04-28T04:07:05.751Z" },
 ]
 
 [[package]]
 name = "metaflow-mcp-server"
-version = "0.2.2"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
@@ -635,7 +635,7 @@ test = [
 requires-dist = [
     { name = "anthropic", marker = "extra == 'benchmark'", specifier = ">=0.50.0" },
     { name = "mcp", specifier = ">=1.0.0" },
-    { name = "metaflow", specifier = ">=2.12.0" },
+    { name = "metaflow", specifier = ">=2.19.23" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0.0" },
     { name = "scipy", marker = "extra == 'benchmark'", specifier = ">=1.11.0" },
     { name = "tabulate", marker = "extra == 'benchmark'", specifier = ">=0.9.0" },
