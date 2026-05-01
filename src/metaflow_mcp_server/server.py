@@ -153,6 +153,130 @@ def _resolve_tasks_for_cards(pathspec: str):
         )
 
 
+def _get_env_from_task(task, flow_name):
+    """Extract conda/pypi environment info from a task.
+
+    Three-tier fallback:
+      1. Netflix — full ResolvedEnvironment from code package
+      2. OSS — simpler manifest from code package
+      3. Metadata-only — just the env ID
+    """
+    import json as json_mod
+
+    metadata = {m.field: m.value for m in task.metadata}
+
+    # Tier 1: Netflix — full ResolvedEnvironment
+    env_id_raw = json_mod.loads(metadata.get("conda_env_id", "[]"))
+    if len(env_id_raw) >= 2:
+        req_id, full_id = env_id_raw[0], env_id_raw[1]
+        arch = env_id_raw[2] if len(env_id_raw) > 2 else None
+        try:
+            from metaflow_extensions.nflx.plugins.conda.env_descr import (
+                CachedEnvironmentInfo,
+            )
+            from metaflow.metaflow_config import CONDA_MAGIC_FILE_V2
+            from metaflow.client.filecache import FileCache
+            import tarfile
+            from io import BytesIO
+
+            code_info = json_mod.loads(metadata.get("code-package", "null"))
+            if code_info:
+                fc = FileCache()
+                _, blobdata = fc.get_data(
+                    code_info["ds_type"],
+                    flow_name,
+                    code_info["location"],
+                    code_info["sha"],
+                )
+                with tarfile.open(fileobj=BytesIO(blobdata), mode="r:gz") as tar:
+                    conda_file = tar.extractfile(CONDA_MAGIC_FILE_V2)
+                if conda_file:
+                    cached = CachedEnvironmentInfo.from_dict(
+                        json_mod.loads(conda_file.read().decode("utf-8"))
+                    )
+                    resolved = cached.env_for(req_id, full_id, arch=arch)
+                    if resolved:
+                        packages = []
+                        for p in sorted(
+                            resolved.packages, key=lambda p: p.package_name
+                        ):
+                            packages.append(
+                                {
+                                    "name": p.package_name,
+                                    "version": p.package_version,
+                                    "detailed_version": p.package_detailed_version,
+                                    "type": p.TYPE,
+                                    "filename": p.filename,
+                                }
+                            )
+                        return {
+                            "req_id": req_id,
+                            "full_id": full_id,
+                            "env_type": resolved.env_type.value,
+                            "arch": resolved.env_id.arch,
+                            "resolved_on": str(resolved.resolved_on),
+                            "resolved_by": resolved.resolved_by,
+                            "co_resolved_archs": resolved.co_resolved_archs,
+                            "user_deps": [str(d) for d in resolved.deps],
+                            "sources": [str(s) for s in resolved.sources],
+                            "packages": packages,
+                            "package_count": len(packages),
+                        }, "netflix"
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        return {
+            "req_id": req_id,
+            "full_id": full_id,
+            "arch": arch,
+            "note": "Environment ID found but full package list unavailable.",
+        }, "metadata_only"
+
+    # Tier 2: OSS — conda.manifest from code package
+    conda_prefix = metadata.get("conda_env_prefix")
+    if conda_prefix:
+        try:
+            from metaflow.plugins.pypi.conda_environment import CondaEnvironment
+
+            client_info = CondaEnvironment.get_client_info(flow_name, metadata)
+            if client_info:
+                packages = []
+                if isinstance(client_info, dict):
+                    for arch_data in client_info.values():
+                        if isinstance(arch_data, dict):
+                            for pkg_list in arch_data.values():
+                                if isinstance(pkg_list, list):
+                                    for pkg in pkg_list:
+                                        if isinstance(pkg, dict) and "url" in pkg:
+                                            url = pkg["url"]
+                                            name = (
+                                                url.rsplit("/", 1)[-1]
+                                                if url
+                                                else "unknown"
+                                            )
+                                            packages.append(
+                                                {"name": name, "url": url}
+                                            )
+                return {
+                    "conda_env_prefix": conda_prefix,
+                    "packages": packages,
+                    "package_count": len(packages),
+                }, "oss"
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        return {
+            "conda_env_prefix": conda_prefix,
+            "note": "Conda prefix found but package details unavailable.",
+        }, "metadata_only"
+
+    return None, None
+
+
 def _build_comparison_html(entries: list[dict]) -> str:
     """Build a side-by-side HTML comparison page from card entries."""
     import html as html_module
@@ -948,6 +1072,104 @@ def get_source_code(
         })
 
 
+# ── Environment Inspection ──────────────────────────────────
+
+
+def _apply_package_filters(result, package_type, max_packages):
+    """Apply package_type filter and max_packages truncation to an env result."""
+    if "packages" not in result:
+        return
+    if package_type:
+        result["packages"] = [
+            p for p in result["packages"] if p.get("type") == package_type
+        ]
+        result["filtered_by"] = package_type
+    total = len(result["packages"])
+    result["package_count"] = total
+    if max_packages is not None and total > max_packages:
+        result["packages"] = result["packages"][:max_packages]
+        result["packages_truncated"] = True
+        result["packages_shown"] = max_packages
+        result["packages_total"] = total
+
+
+@mcp.tool()
+@_handle_errors
+def get_environment(
+    pathspec: str,
+    package_type: str | None = None,
+    max_packages: int | None = None,
+) -> str:
+    """Get the conda/pypi environment details for a Metaflow task or run.
+
+    Returns the full list of packages installed, user-requested dependencies,
+    and metadata (who resolved it, when, architecture, environment type).
+
+    Works with both Netflix (nflx-metaflow) and OSS Metaflow installations.
+
+    Args:
+        pathspec: Run ("FlowName/RunID"), step ("FlowName/RunID/StepName"),
+                  or task ("FlowName/RunID/StepName/TaskID") pathspec.
+                  For run pathspecs, scans steps to find the first with an environment.
+        package_type: Filter packages by type: "conda" or "pypi". If omitted, returns all.
+        max_packages: Max number of packages to return. If the environment has more,
+                      the list is truncated and packages_truncated=true is set.
+                      Useful for large environments (100+ packages).
+    """
+    from metaflow import Run, Step, Task
+
+    parts = pathspec.split("/")
+    flow_name = parts[0]
+
+    if len(parts) == 2:
+        run = Run(pathspec)
+        for step in run:
+            for task in step:
+                result, source = _get_env_from_task(task, flow_name)
+                if result is not None:
+                    result["pathspec"] = task.pathspec
+                    result["source"] = source
+                    _apply_package_filters(result, package_type, max_packages)
+                    return _json(result)
+                break
+        return _json(
+            {
+                "pathspec": pathspec,
+                "error": "no_environment",
+                "message": "No conda/pypi environment found in any step of this run.",
+            }
+        )
+    elif len(parts) == 3:
+        step = Step(pathspec)
+        task = next(iter(step))
+    elif len(parts) == 4:
+        task = Task(pathspec)
+    else:
+        return _json(
+            {
+                "error": "invalid_pathspec",
+                "message": "Expected FlowName/RunID, FlowName/RunID/StepName, "
+                "or FlowName/RunID/StepName/TaskID",
+            }
+        )
+
+    result, source = _get_env_from_task(task, flow_name)
+    if result is None:
+        return _json(
+            {
+                "pathspec": task.pathspec,
+                "error": "no_environment",
+                "message": "No conda/pypi environment metadata found. "
+                "The task may not use @conda or @pypi decorators.",
+            }
+        )
+
+    result["pathspec"] = task.pathspec
+    result["source"] = source
+    _apply_package_filters(result, package_type, max_packages)
+    return _json(result)
+
+
 @mcp.tool()
 @_handle_errors
 def get_recent_runs(
@@ -1049,6 +1271,7 @@ def get_tool_schemas() -> list[dict]:
         search_artifacts,
         get_recent_runs,
         get_source_code,
+        get_environment,
     ]
     schemas = []
     for fn in tool_fns:

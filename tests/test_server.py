@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from metaflow_mcp_server.server import mcp, _filter_log, _parse_dt, _ensure_tz, _duration, _extract_text_from_html
+from metaflow_mcp_server.server import mcp, _filter_log, _parse_dt, _ensure_tz, _duration, _extract_text_from_html, _get_env_from_task, _apply_package_filters
 
 INTEGRATION = os.environ.get("METAFLOW_MCP_INTEGRATION") == "1"
 
@@ -52,6 +52,7 @@ class TestToolRegistration:
             "search_artifacts",
             "get_recent_runs",
             "get_source_code",
+            "get_environment",
         }
         assert expected == names
 
@@ -238,6 +239,180 @@ class TestHelpers:
 
     def test_extract_text_empty(self):
         assert _extract_text_from_html("") == ""
+
+
+class TestGetEnvironment:
+    """Tests for the get_environment tool and _get_env_from_task helper."""
+
+    def test_get_environment_has_params(self):
+        tools = asyncio.get_event_loop().run_until_complete(mcp.list_tools())
+        tool = next(t for t in tools if t.name == "get_environment")
+        props = tool.inputSchema["properties"]
+        assert "pathspec" in props
+        assert "package_type" in props
+
+    def test_get_environment_invalid_pathspec(self, run_tool):
+        result = run_tool("get_environment", {"pathspec": "just_one_part"})
+        assert result["error"] == "invalid_pathspec"
+
+    def test_get_environment_bad_task(self, run_tool):
+        result = run_tool("get_environment", {"pathspec": "FakeFlow/999/step/0"})
+        assert "error" in result
+
+    def test_get_env_from_task_no_metadata(self):
+        """Task without conda metadata returns None."""
+        from unittest.mock import MagicMock
+        task = MagicMock()
+        task.metadata = []
+        result, source = _get_env_from_task(task, "TestFlow")
+        assert result is None
+        assert source is None
+
+    def test_get_env_from_task_metadata_only_netflix(self):
+        """Task with conda_env_id but no code package falls back to metadata_only."""
+        from unittest.mock import MagicMock
+        metadata_entry = MagicMock()
+        metadata_entry.field = "conda_env_id"
+        metadata_entry.value = '["abc123", "def456", "linux-64"]'
+        task = MagicMock()
+        task.metadata = [metadata_entry]
+        result, source = _get_env_from_task(task, "TestFlow")
+        assert source == "metadata_only"
+        assert result["req_id"] == "abc123"
+        assert result["full_id"] == "def456"
+        assert result["arch"] == "linux-64"
+
+    def test_get_env_from_task_metadata_only_oss(self):
+        """Task with conda_env_prefix but CondaEnvironment import fails falls back to metadata_only."""
+        from unittest.mock import MagicMock
+        metadata_entry = MagicMock()
+        metadata_entry.field = "conda_env_prefix"
+        metadata_entry.value = "metaflow/abc123/linux-64"
+        task = MagicMock()
+        task.metadata = [metadata_entry]
+        result, source = _get_env_from_task(task, "TestFlow")
+        # Will be metadata_only if OSS CondaEnvironment.get_client_info fails
+        # or "oss" if it succeeds — either is valid
+        assert source in ("oss", "metadata_only")
+        if source == "metadata_only":
+            assert result["conda_env_prefix"] == "metaflow/abc123/linux-64"
+
+    def test_get_env_from_task_netflix_with_mock_resolved_env(self):
+        """Netflix path with full ResolvedEnvironment extraction."""
+        from unittest.mock import MagicMock, patch
+        import json as json_mod
+
+        metadata_entries = [
+            MagicMock(field="conda_env_id", value='["req123", "full456", "linux-64"]'),
+            MagicMock(
+                field="code-package",
+                value=json_mod.dumps({"ds_type": "s3", "location": "s3://bucket", "sha": "abc"}),
+            ),
+        ]
+        task = MagicMock()
+        task.metadata = metadata_entries
+
+        mock_pkg = MagicMock()
+        mock_pkg.package_name = "numpy"
+        mock_pkg.package_version = "1.26.4"
+        mock_pkg.package_detailed_version = "1.26.4-py310"
+        mock_pkg.TYPE = "pypi"
+        mock_pkg.filename = "numpy-1.26.4.whl"
+
+        mock_resolved = MagicMock()
+        mock_resolved.packages = [mock_pkg]
+        mock_resolved.env_type.value = "pypi-only"
+        mock_resolved.env_id.arch = "linux-64"
+        mock_resolved.resolved_on = "2025-01-15T10:30:00"
+        mock_resolved.resolved_by = "testuser"
+        mock_resolved.co_resolved_archs = ["linux-64"]
+        mock_resolved.deps = [MagicMock(__str__=lambda s: "pypi::numpy>=1.0")]
+        mock_resolved.sources = [MagicMock(__str__=lambda s: "pypi::https://pypi.org/simple")]
+
+        mock_cached = MagicMock()
+        mock_cached.env_for.return_value = mock_resolved
+
+        mock_cached_cls = MagicMock()
+        mock_cached_cls.from_dict.return_value = mock_cached
+
+        mock_tar_member = MagicMock()
+        mock_tar_member.read.return_value = b'{"dummy": "manifest"}'
+
+        with patch.dict("sys.modules", {
+            "metaflow_extensions": MagicMock(),
+            "metaflow_extensions.nflx": MagicMock(),
+            "metaflow_extensions.nflx.plugins": MagicMock(),
+            "metaflow_extensions.nflx.plugins.conda": MagicMock(),
+            "metaflow_extensions.nflx.plugins.conda.env_descr": MagicMock(
+                CachedEnvironmentInfo=mock_cached_cls
+            ),
+        }), patch("metaflow.metaflow_config.CONDA_MAGIC_FILE_V2", "conda_v2.cnd", create=True), \
+             patch("metaflow.client.filecache.FileCache") as mock_fc_cls:
+
+            mock_fc = MagicMock()
+            mock_fc.get_data.return_value = (None, b"fake_tarball")
+            mock_fc_cls.return_value = mock_fc
+
+            with patch("tarfile.open") as mock_taropen:
+                mock_tar = MagicMock()
+                mock_tar.__enter__ = MagicMock(return_value=mock_tar)
+                mock_tar.__exit__ = MagicMock(return_value=False)
+                mock_tar.extractfile.return_value = mock_tar_member
+                mock_taropen.return_value = mock_tar
+
+                result, source = _get_env_from_task(task, "TestFlow")
+
+        assert source == "netflix"
+        assert result["req_id"] == "req123"
+        assert result["full_id"] == "full456"
+        assert result["arch"] == "linux-64"
+        assert result["resolved_by"] == "testuser"
+        assert result["package_count"] == 1
+        assert result["packages"][0]["name"] == "numpy"
+        assert result["packages"][0]["version"] == "1.26.4"
+        assert result["packages"][0]["type"] == "pypi"
+        mock_cached.env_for.assert_called_with("req123", "full456", arch="linux-64")
+
+    def test_apply_package_filters_type(self):
+        result = {
+            "packages": [
+                {"name": "numpy", "type": "pypi"},
+                {"name": "python", "type": "conda"},
+                {"name": "pandas", "type": "pypi"},
+            ]
+        }
+        _apply_package_filters(result, "pypi", None)
+        assert result["package_count"] == 2
+        assert all(p["type"] == "pypi" for p in result["packages"])
+
+    def test_apply_package_filters_max(self):
+        result = {
+            "packages": [{"name": f"pkg{i}", "type": "pypi"} for i in range(100)]
+        }
+        _apply_package_filters(result, None, 10)
+        assert result["packages_truncated"] is True
+        assert result["packages_shown"] == 10
+        assert result["packages_total"] == 100
+        assert len(result["packages"]) == 10
+
+    def test_apply_package_filters_no_truncation(self):
+        result = {"packages": [{"name": "a"}, {"name": "b"}]}
+        _apply_package_filters(result, None, 10)
+        assert "packages_truncated" not in result
+        assert result["package_count"] == 2
+
+    def test_apply_package_filters_no_packages_key(self):
+        result = {"req_id": "abc"}
+        _apply_package_filters(result, "pypi", 10)
+        assert "packages" not in result
+
+    def test_package_type_filter(self, run_tool):
+        """package_type filter is accepted without crashing (even on non-conda tasks)."""
+        result = run_tool(
+            "get_environment",
+            {"pathspec": "FakeFlow/999/step/0", "package_type": "pypi"},
+        )
+        assert "error" in result
 
 
 class TestErrorHandling:
