@@ -381,15 +381,54 @@ class TestGetEnvironment:
                 {"name": "pandas", "type": "pypi"},
             ]
         }
-        _apply_package_filters(result, "pypi", None)
+        _apply_package_filters(result, "pypi", None, None)
         assert result["package_count"] == 2
         assert all(p["type"] == "pypi" for p in result["packages"])
+
+    def test_apply_package_filters_by_name(self):
+        result = {
+            "packages": [
+                {"name": "numpy", "version": "1.26.4", "type": "pypi"},
+                {"name": "pandas", "version": "2.1.0", "type": "pypi"},
+                {"name": "numpy-base", "version": "1.26.4", "type": "conda"},
+            ]
+        }
+        _apply_package_filters(result, None, "numpy", None)
+        assert result["package_count"] == 2
+        assert result["filtered_by_name"] == "numpy"
+        names = [p["name"] for p in result["packages"]]
+        assert "numpy" in names
+        assert "numpy-base" in names
+        assert "pandas" not in names
+
+    def test_apply_package_filters_by_name_case_insensitive(self):
+        result = {
+            "packages": [
+                {"name": "NumPy", "type": "pypi"},
+                {"name": "pandas", "type": "pypi"},
+            ]
+        }
+        _apply_package_filters(result, None, "numpy", None)
+        assert result["package_count"] == 1
+        assert result["packages"][0]["name"] == "NumPy"
+
+    def test_apply_package_filters_combined(self):
+        result = {
+            "packages": [
+                {"name": "numpy", "type": "pypi"},
+                {"name": "numpy-base", "type": "conda"},
+                {"name": "pandas", "type": "pypi"},
+            ]
+        }
+        _apply_package_filters(result, "pypi", "numpy", None)
+        assert result["package_count"] == 1
+        assert result["packages"][0]["name"] == "numpy"
 
     def test_apply_package_filters_max(self):
         result = {
             "packages": [{"name": f"pkg{i}", "type": "pypi"} for i in range(100)]
         }
-        _apply_package_filters(result, None, 10)
+        _apply_package_filters(result, None, None, 10)
         assert result["packages_truncated"] is True
         assert result["packages_shown"] == 10
         assert result["packages_total"] == 100
@@ -397,13 +436,13 @@ class TestGetEnvironment:
 
     def test_apply_package_filters_no_truncation(self):
         result = {"packages": [{"name": "a"}, {"name": "b"}]}
-        _apply_package_filters(result, None, 10)
+        _apply_package_filters(result, None, None, 10)
         assert "packages_truncated" not in result
         assert result["package_count"] == 2
 
     def test_apply_package_filters_no_packages_key(self):
         result = {"req_id": "abc"}
-        _apply_package_filters(result, "pypi", 10)
+        _apply_package_filters(result, "pypi", None, 10)
         assert "packages" not in result
 
     def test_package_type_filter(self, run_tool):

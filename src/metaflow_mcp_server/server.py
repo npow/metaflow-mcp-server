@@ -1075,15 +1075,21 @@ def get_source_code(
 # ── Environment Inspection ──────────────────────────────────
 
 
-def _apply_package_filters(result, package_type, max_packages):
-    """Apply package_type filter and max_packages truncation to an env result."""
+def _apply_package_filters(result, package_type, package_name, max_packages):
+    """Apply package filters and truncation to an env result."""
     if "packages" not in result:
         return
     if package_type:
         result["packages"] = [
             p for p in result["packages"] if p.get("type") == package_type
         ]
-        result["filtered_by"] = package_type
+        result["filtered_by_type"] = package_type
+    if package_name:
+        needle = package_name.lower()
+        result["packages"] = [
+            p for p in result["packages"] if needle in p.get("name", "").lower()
+        ]
+        result["filtered_by_name"] = package_name
     total = len(result["packages"])
     result["package_count"] = total
     if max_packages is not None and total > max_packages:
@@ -1098,6 +1104,7 @@ def _apply_package_filters(result, package_type, max_packages):
 def get_environment(
     pathspec: str,
     package_type: str | None = None,
+    package_name: str | None = None,
     max_packages: int | None = None,
 ) -> str:
     """Get the conda/pypi environment details for a Metaflow task or run.
@@ -1112,6 +1119,9 @@ def get_environment(
                   or task ("FlowName/RunID/StepName/TaskID") pathspec.
                   For run pathspecs, scans steps to find the first with an environment.
         package_type: Filter packages by type: "conda" or "pypi". If omitted, returns all.
+        package_name: Filter packages by name (case-insensitive substring match).
+                      Use this to check if a specific package is installed and what version.
+                      E.g. "numpy" returns only packages with "numpy" in the name.
         max_packages: Max number of packages to return. If the environment has more,
                       the list is truncated and packages_truncated=true is set.
                       Useful for large environments (100+ packages).
@@ -1129,7 +1139,7 @@ def get_environment(
                 if result is not None:
                     result["pathspec"] = task.pathspec
                     result["source"] = source
-                    _apply_package_filters(result, package_type, max_packages)
+                    _apply_package_filters(result, package_type, package_name, max_packages)
                     return _json(result)
                 break
         return _json(
@@ -1166,7 +1176,7 @@ def get_environment(
 
     result["pathspec"] = task.pathspec
     result["source"] = source
-    _apply_package_filters(result, package_type, max_packages)
+    _apply_package_filters(result, package_type, package_name, max_packages)
     return _json(result)
 
 
