@@ -1412,19 +1412,13 @@ def trigger_run(
 
     result = {"identifier": identifier, "impl": resolved_impl, "action": "triggered"}
     for attr in ("workflow_id", "workflow_instance_id", "workflow_run_id",
-                 "workflow_version", "status", "cluster_name"):
+                 "workflow_version", "status", "cluster_name",
+                 "maestro_ui", "metaflow_ui"):
         try:
             val = getattr(triggered, attr)
             if val is not None:
                 result[attr] = str(val)
-        except (AttributeError, Exception):
-            pass
-    for attr in ("maestro_ui", "metaflow_ui"):
-        try:
-            val = getattr(triggered, attr)
-            if val is not None:
-                result[attr] = str(val)
-        except (AttributeError, Exception):
+        except AttributeError:
             pass
 
     return _json(result)
@@ -1454,19 +1448,13 @@ def get_triggered_run_status(
 
     result = {"identifier": identifier, "run_id": run_id, "impl": resolved_impl}
     for attr in ("status", "workflow_id", "workflow_instance_id",
-                 "workflow_run_id", "workflow_version", "cluster_name"):
+                 "workflow_run_id", "workflow_version", "cluster_name",
+                 "maestro_ui", "metaflow_ui"):
         try:
             val = getattr(triggered, attr)
             if val is not None:
                 result[attr] = str(val)
-        except (AttributeError, Exception):
-            pass
-    for attr in ("maestro_ui", "metaflow_ui"):
-        try:
-            val = getattr(triggered, attr)
-            if val is not None:
-                result[attr] = str(val)
-        except (AttributeError, Exception):
+        except AttributeError:
             pass
 
     try:
@@ -1475,7 +1463,7 @@ def get_triggered_run_status(
             result["metaflow_pathspec"] = mf_run.pathspec
             result["successful"] = mf_run.successful
             result["finished"] = mf_run.finished
-    except Exception:
+    except (AttributeError, RuntimeError):
         result["metaflow_run"] = "not yet available (start step has not begun)"
 
     return _json(result)
@@ -1513,7 +1501,7 @@ def terminate_run(
     }
     try:
         result["status"] = str(triggered.status)
-    except Exception:
+    except AttributeError:
         pass
 
     return _json(result)
@@ -1545,15 +1533,19 @@ async def run_flow(
         tags: Optional tags to apply to the run.
         max_workers: Max parallel workers for foreach steps.
     """
+    import os
     from metaflow import Runner
 
+    if not os.path.isfile(flow_file):
+        return _json({"error": "FileNotFoundError", "message": f"Flow file not found: {flow_file}"})
+
     kwargs = {}
+    if parameters:
+        kwargs.update(parameters)
     if tags:
         kwargs["tag"] = tags
     if max_workers is not None:
         kwargs["max_workers"] = max_workers
-    if parameters:
-        kwargs.update(parameters)
 
     runner = Runner(flow_file, show_output=False)
     executing = await runner.async_run(**kwargs)
@@ -1588,7 +1580,11 @@ async def resume_run(
         origin_run_id: Run ID to resume from (e.g. "1715234567890").
                       Use get_run or get_latest_failure to find this.
     """
+    import os
     from metaflow import Runner
+
+    if not os.path.isfile(flow_file):
+        return _json({"error": "FileNotFoundError", "message": f"Flow file not found: {flow_file}"})
 
     runner = Runner(flow_file, show_output=False)
     executing = await runner.async_resume(origin_run_id=origin_run_id)

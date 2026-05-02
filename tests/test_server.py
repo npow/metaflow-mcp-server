@@ -861,7 +861,7 @@ class TestDeploymentManagement(unittest.TestCase):
         mock_triggered.maestro_ui = None
         mock_triggered.metaflow_ui = None
         # accessing .run raises (start step not yet begun)
-        type(mock_triggered).run = property(lambda self: (_ for _ in ()).throw(Exception("not started")))
+        type(mock_triggered).run = property(lambda self: (_ for _ in ()).throw(RuntimeError("not started")))
 
         mock_df_cls.get_triggered_run.return_value = mock_triggered
 
@@ -901,9 +901,8 @@ class TestDeploymentManagement(unittest.TestCase):
 
     @patch("metaflow.DeployedFlow")
     def test_terminate_run_status_unavailable(self, mock_df_cls):
-        mock_triggered = MagicMock()
+        mock_triggered = MagicMock(spec=["terminate"])
         mock_triggered.terminate.return_value = None
-        type(mock_triggered).status = property(lambda self: (_ for _ in ()).throw(Exception("gone")))
 
         mock_df_cls.get_triggered_run.return_value = mock_triggered
 
@@ -923,8 +922,9 @@ class TestDeploymentManagement(unittest.TestCase):
 
 
 class TestRunnerTools(unittest.TestCase):
+    @patch("os.path.isfile", return_value=True)
     @patch("metaflow.Runner")
-    def test_run_flow(self, mock_runner_cls):
+    def test_run_flow(self, mock_runner_cls, _mock_isfile):
         mock_run = MagicMock()
         mock_run.pathspec = "MyFlow/456"
         mock_run.id = "456"
@@ -947,8 +947,9 @@ class TestRunnerTools(unittest.TestCase):
         assert result["run_id"] == "456"
         assert result["status"] == "running"
 
+    @patch("os.path.isfile", return_value=True)
     @patch("metaflow.Runner")
-    def test_run_flow_with_parameters(self, mock_runner_cls):
+    def test_run_flow_with_parameters(self, mock_runner_cls, _mock_isfile):
         mock_run = MagicMock()
         mock_run.pathspec = "MyFlow/789"
         mock_run.id = "789"
@@ -982,8 +983,9 @@ class TestRunnerTools(unittest.TestCase):
         assert "error" in result
         assert "message" in result
 
+    @patch("os.path.isfile", return_value=True)
     @patch("metaflow.Runner")
-    def test_resume_run(self, mock_runner_cls):
+    def test_resume_run(self, mock_runner_cls, _mock_isfile):
         mock_run = MagicMock()
         mock_run.pathspec = "MyFlow/999"
         mock_run.id = "999"
