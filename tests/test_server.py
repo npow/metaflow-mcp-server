@@ -638,3 +638,429 @@ class TestIntegration:
 
         result = run_tool("get_task_logs", {"pathspec": task_path, "tail": 5})
         assert "stdout" in result or "stderr" in result
+
+
+# ── Unit tests for write/execute tools ─────────────────────────────────────
+
+
+class TestTagManagement(unittest.TestCase):
+    @patch("metaflow.Run")
+    def test_add_run_tags(self, mock_run_cls):
+        mock_run = MagicMock()
+        mock_run.user_tags = {"existing", "new_tag"}
+        mock_run_cls.return_value = mock_run
+
+        result = json.loads(add_run_tags("Flow/123", ["new_tag"]))
+
+        mock_run_cls.assert_called_once_with("Flow/123")
+        mock_run.add_tags.assert_called_once_with(["new_tag"])
+        assert result["pathspec"] == "Flow/123"
+        assert result["added"] == ["new_tag"]
+        assert "new_tag" in result["current_tags"]
+
+    @patch("metaflow.Run")
+    def test_add_run_tags_multiple(self, mock_run_cls):
+        mock_run = MagicMock()
+        mock_run.user_tags = {"a", "b", "c"}
+        mock_run_cls.return_value = mock_run
+
+        result = json.loads(add_run_tags("Flow/123", ["b", "c"]))
+
+        mock_run.add_tags.assert_called_once_with(["b", "c"])
+        assert result["added"] == ["b", "c"]
+        assert sorted(result["current_tags"]) == ["a", "b", "c"]
+
+    @patch("metaflow.Run")
+    def test_add_run_tags_invalid_pathspec(self, mock_run_cls):
+        mock_run_cls.side_effect = Exception("not found")
+
+        result = json.loads(add_run_tags("Bad/Path", ["tag"]))
+
+        assert "error" in result
+        assert "message" in result
+
+    @patch("metaflow.Run")
+    def test_remove_run_tags(self, mock_run_cls):
+        mock_run = MagicMock()
+        mock_run.user_tags = {"remaining"}
+        mock_run_cls.return_value = mock_run
+
+        result = json.loads(remove_run_tags("Flow/123", ["old_tag"]))
+
+        mock_run_cls.assert_called_once_with("Flow/123")
+        mock_run.remove_tags.assert_called_once_with(["old_tag"])
+        assert result["pathspec"] == "Flow/123"
+        assert result["removed"] == ["old_tag"]
+        assert "remaining" in result["current_tags"]
+
+    @patch("metaflow.Run")
+    def test_remove_run_tags_invalid_pathspec(self, mock_run_cls):
+        mock_run_cls.side_effect = Exception("not found")
+
+        result = json.loads(remove_run_tags("Bad/Path", ["tag"]))
+
+        assert "error" in result
+        assert "message" in result
+
+    @patch("metaflow.Run")
+    def test_remove_run_tags_current_tags_empty(self, mock_run_cls):
+        mock_run = MagicMock()
+        mock_run.user_tags = set()
+        mock_run_cls.return_value = mock_run
+
+        result = json.loads(remove_run_tags("Flow/123", ["gone"]))
+
+        assert result["removed"] == ["gone"]
+        assert result["current_tags"] == []
+
+
+class TestDeploymentManagement(unittest.TestCase):
+    @patch("metaflow.DeployedFlow")
+    def test_list_deployments(self, mock_df_cls):
+        mock_dep1 = MagicMock()
+        mock_dep1.__class__.__name__ = "MaestroDeployedFlow"
+        mock_dep1.workflow_id = "proj.TrainFlow"
+        mock_dep1.name = "TrainFlow"
+        mock_dep1.flow_name = "TrainFlow"
+        # attrs that should be skipped when None
+        mock_dep1.cluster_name = None
+        mock_dep1.workflow_version = "1"
+        mock_dep1.identifier = "proj.TrainFlow"
+
+        mock_df_cls.list_deployed_flows.return_value = [mock_dep1]
+
+        with patch("metaflow_mcp_server.server._get_deployer_impl", return_value="maestro"):
+            result = json.loads(list_deployments(flow_name="TrainFlow", impl="maestro"))
+
+        assert result["flow_name"] == "TrainFlow"
+        assert result["impl"] == "maestro"
+        assert result["count"] == 1
+        assert result["deployments"][0]["workflow_id"] == "proj.TrainFlow"
+        assert result["deployments"][0]["name"] == "TrainFlow"
+        # None-valued attrs should be omitted
+        assert "cluster_name" not in result["deployments"][0]
+
+    @patch("metaflow.DeployedFlow")
+    def test_list_deployments_empty(self, mock_df_cls):
+        mock_df_cls.list_deployed_flows.return_value = []
+
+        with patch("metaflow_mcp_server.server._get_deployer_impl", return_value="argo_workflows"):
+            result = json.loads(list_deployments())
+
+        assert result["count"] == 0
+        assert result["deployments"] == []
+
+    @patch("metaflow.DeployedFlow")
+    def test_list_deployments_error(self, mock_df_cls):
+        mock_df_cls.list_deployed_flows.side_effect = Exception("backend unavailable")
+
+        result = json.loads(list_deployments(impl="maestro"))
+
+        assert "error" in result
+
+    @patch("metaflow.DeployedFlow")
+    def test_trigger_run(self, mock_df_cls):
+        mock_triggered = MagicMock()
+        mock_triggered.workflow_run_id = "run-42"
+        mock_triggered.workflow_id = "proj.TrainFlow"
+        mock_triggered.workflow_instance_id = None
+        mock_triggered.workflow_version = None
+        mock_triggered.status = "running"
+        mock_triggered.cluster_name = None
+        mock_triggered.maestro_ui = "https://maestro/run-42"
+        mock_triggered.metaflow_ui = None
+
+        mock_df = MagicMock()
+        mock_df.run.return_value = mock_triggered
+        mock_df_cls.from_deployment.return_value = mock_df
+
+        with patch("metaflow_mcp_server.server._get_deployer_impl", return_value="maestro"):
+            result = json.loads(trigger_run("proj.TrainFlow", parameters={"lr": "0.01"}, impl="maestro"))
+
+        mock_df_cls.from_deployment.assert_called_once_with("proj.TrainFlow", impl="maestro")
+        mock_df.run.assert_called_once_with(lr="0.01")
+        assert result["identifier"] == "proj.TrainFlow"
+        assert result["action"] == "triggered"
+        assert result["workflow_run_id"] == "run-42"
+        assert result["maestro_ui"] == "https://maestro/run-42"
+        # None-valued attrs should be omitted
+        assert "workflow_instance_id" not in result
+        assert "metaflow_ui" not in result
+
+    @patch("metaflow.DeployedFlow")
+    def test_trigger_run_no_parameters(self, mock_df_cls):
+        mock_triggered = MagicMock()
+        mock_triggered.workflow_run_id = "run-99"
+        mock_triggered.workflow_id = "proj.TrainFlow"
+        mock_triggered.workflow_instance_id = None
+        mock_triggered.workflow_version = None
+        mock_triggered.status = "pending"
+        mock_triggered.cluster_name = None
+        mock_triggered.maestro_ui = None
+        mock_triggered.metaflow_ui = None
+
+        mock_df = MagicMock()
+        mock_df.run.return_value = mock_triggered
+        mock_df_cls.from_deployment.return_value = mock_df
+
+        with patch("metaflow_mcp_server.server._get_deployer_impl", return_value="maestro"):
+            result = json.loads(trigger_run("proj.TrainFlow", impl="maestro"))
+
+        mock_df.run.assert_called_once_with()
+        assert result["action"] == "triggered"
+
+    @patch("metaflow.DeployedFlow")
+    def test_trigger_run_error(self, mock_df_cls):
+        mock_df_cls.from_deployment.side_effect = Exception("deployment not found")
+
+        result = json.loads(trigger_run("bad.identifier"))
+
+        assert "error" in result
+
+    @patch("metaflow.DeployedFlow")
+    def test_get_triggered_run_status_with_metaflow_run(self, mock_df_cls):
+        mock_mf_run = MagicMock()
+        mock_mf_run.pathspec = "TrainFlow/123"
+        mock_mf_run.successful = False
+        mock_mf_run.finished = False
+
+        mock_triggered = MagicMock()
+        mock_triggered.status = "running"
+        mock_triggered.workflow_id = "proj.TrainFlow"
+        mock_triggered.workflow_instance_id = "inst-7"
+        mock_triggered.workflow_run_id = "run-42"
+        mock_triggered.workflow_version = None
+        mock_triggered.cluster_name = None
+        mock_triggered.maestro_ui = None
+        mock_triggered.metaflow_ui = None
+        mock_triggered.run = mock_mf_run
+
+        mock_df_cls.get_triggered_run.return_value = mock_triggered
+
+        with patch("metaflow_mcp_server.server._get_deployer_impl", return_value="maestro"):
+            result = json.loads(get_triggered_run_status("proj.TrainFlow", "run-42", impl="maestro"))
+
+        mock_df_cls.get_triggered_run.assert_called_once_with(
+            "proj.TrainFlow", "run-42", impl="maestro"
+        )
+        assert result["identifier"] == "proj.TrainFlow"
+        assert result["run_id"] == "run-42"
+        assert result["status"] == "running"
+        assert result["metaflow_pathspec"] == "TrainFlow/123"
+        assert result["finished"] is False
+
+    @patch("metaflow.DeployedFlow")
+    def test_get_triggered_run_status_no_metaflow_run_yet(self, mock_df_cls):
+        mock_triggered = MagicMock()
+        mock_triggered.status = "pending"
+        mock_triggered.workflow_id = "proj.TrainFlow"
+        mock_triggered.workflow_instance_id = None
+        mock_triggered.workflow_run_id = "run-1"
+        mock_triggered.workflow_version = None
+        mock_triggered.cluster_name = None
+        mock_triggered.maestro_ui = None
+        mock_triggered.metaflow_ui = None
+        # accessing .run raises (start step not yet begun)
+        type(mock_triggered).run = property(lambda self: (_ for _ in ()).throw(Exception("not started")))
+
+        mock_df_cls.get_triggered_run.return_value = mock_triggered
+
+        with patch("metaflow_mcp_server.server._get_deployer_impl", return_value="maestro"):
+            result = json.loads(get_triggered_run_status("proj.TrainFlow", "run-1", impl="maestro"))
+
+        assert result["status"] == "pending"
+        assert "metaflow_run" in result
+        assert "not yet available" in result["metaflow_run"]
+
+    @patch("metaflow.DeployedFlow")
+    def test_get_triggered_run_status_error(self, mock_df_cls):
+        mock_df_cls.get_triggered_run.side_effect = Exception("run not found")
+
+        result = json.loads(get_triggered_run_status("proj.TrainFlow", "bad-id"))
+
+        assert "error" in result
+
+    @patch("metaflow.DeployedFlow")
+    def test_terminate_run(self, mock_df_cls):
+        mock_triggered = MagicMock()
+        mock_triggered.status = "terminated"
+
+        mock_df_cls.get_triggered_run.return_value = mock_triggered
+
+        with patch("metaflow_mcp_server.server._get_deployer_impl", return_value="maestro"):
+            result = json.loads(terminate_run("proj.TrainFlow", "run-42", impl="maestro"))
+
+        mock_df_cls.get_triggered_run.assert_called_once_with(
+            "proj.TrainFlow", "run-42", impl="maestro"
+        )
+        mock_triggered.terminate.assert_called_once()
+        assert result["identifier"] == "proj.TrainFlow"
+        assert result["run_id"] == "run-42"
+        assert result["action"] == "terminated"
+        assert result["status"] == "terminated"
+
+    @patch("metaflow.DeployedFlow")
+    def test_terminate_run_status_unavailable(self, mock_df_cls):
+        mock_triggered = MagicMock()
+        mock_triggered.terminate.return_value = None
+        type(mock_triggered).status = property(lambda self: (_ for _ in ()).throw(Exception("gone")))
+
+        mock_df_cls.get_triggered_run.return_value = mock_triggered
+
+        with patch("metaflow_mcp_server.server._get_deployer_impl", return_value="maestro"):
+            result = json.loads(terminate_run("proj.TrainFlow", "run-42", impl="maestro"))
+
+        assert result["action"] == "terminated"
+        assert "status" not in result
+
+    @patch("metaflow.DeployedFlow")
+    def test_terminate_run_error(self, mock_df_cls):
+        mock_df_cls.get_triggered_run.side_effect = Exception("run not found")
+
+        result = json.loads(terminate_run("proj.TrainFlow", "bad-id"))
+
+        assert "error" in result
+
+
+class TestRunnerTools(unittest.TestCase):
+    @patch("metaflow.Runner")
+    def test_run_flow(self, mock_runner_cls):
+        mock_run = MagicMock()
+        mock_run.pathspec = "MyFlow/456"
+        mock_run.id = "456"
+
+        mock_executing = MagicMock()
+        mock_executing.run = mock_run
+        mock_executing.status = "running"
+
+        mock_runner = MagicMock()
+        mock_runner.async_run = AsyncMock(return_value=mock_executing)
+        mock_runner_cls.return_value = mock_runner
+
+        result = json.loads(asyncio.run(run_flow("myflow.py")))
+
+        mock_runner_cls.assert_called_once_with("myflow.py", show_output=False)
+        mock_runner.async_run.assert_called_once_with()
+        assert result["flow_file"] == "myflow.py"
+        assert result["action"] == "started"
+        assert result["pathspec"] == "MyFlow/456"
+        assert result["run_id"] == "456"
+        assert result["status"] == "running"
+
+    @patch("metaflow.Runner")
+    def test_run_flow_with_parameters(self, mock_runner_cls):
+        mock_run = MagicMock()
+        mock_run.pathspec = "MyFlow/789"
+        mock_run.id = "789"
+
+        mock_executing = MagicMock()
+        mock_executing.run = mock_run
+        mock_executing.status = "running"
+
+        mock_runner = MagicMock()
+        mock_runner.async_run = AsyncMock(return_value=mock_executing)
+        mock_runner_cls.return_value = mock_runner
+
+        result = json.loads(asyncio.run(run_flow(
+            "myflow.py",
+            parameters={"lr": "0.01", "epochs": "10"},
+            tags=["experiment"],
+            max_workers=4,
+        )))
+
+        mock_runner.async_run.assert_called_once_with(
+            tag=["experiment"], max_workers=4, lr="0.01", epochs="10"
+        )
+        assert result["pathspec"] == "MyFlow/789"
+
+    @patch("metaflow.Runner")
+    def test_run_flow_error(self, mock_runner_cls):
+        mock_runner_cls.side_effect = Exception("file not found")
+
+        result = json.loads(asyncio.run(run_flow("missing.py")))
+
+        assert "error" in result
+        assert "message" in result
+
+    @patch("metaflow.Runner")
+    def test_resume_run(self, mock_runner_cls):
+        mock_run = MagicMock()
+        mock_run.pathspec = "MyFlow/999"
+        mock_run.id = "999"
+
+        mock_executing = MagicMock()
+        mock_executing.run = mock_run
+        mock_executing.status = "running"
+
+        mock_runner = MagicMock()
+        mock_runner.async_resume = AsyncMock(return_value=mock_executing)
+        mock_runner_cls.return_value = mock_runner
+
+        result = json.loads(asyncio.run(resume_run("myflow.py", "456")))
+
+        mock_runner_cls.assert_called_once_with("myflow.py", show_output=False)
+        mock_runner.async_resume.assert_called_once_with(origin_run_id="456")
+        assert result["flow_file"] == "myflow.py"
+        assert result["action"] == "resumed"
+        assert result["origin_run_id"] == "456"
+        assert result["pathspec"] == "MyFlow/999"
+        assert result["run_id"] == "999"
+
+    @patch("metaflow.Runner")
+    def test_resume_run_error(self, mock_runner_cls):
+        mock_runner_cls.side_effect = Exception("origin run not found")
+
+        result = json.loads(asyncio.run(resume_run("myflow.py", "bad-id")))
+
+        assert "error" in result
+        assert "message" in result
+
+
+class TestGetDeployerImpl(unittest.TestCase):
+    def test_explicit_impl_returned_as_is(self):
+        assert _get_deployer_impl("maestro") == "maestro"
+
+    def test_explicit_impl_with_dash_not_normalized(self):
+        # explicit arg is returned as-is (no normalization)
+        assert _get_deployer_impl("argo-workflows") == "argo-workflows"
+
+    @patch.dict(os.environ, {"METAFLOW_DEFAULT_FROM_DEPLOYMENT_IMPL": "dagobah"})
+    def test_env_var_used_when_no_explicit_impl(self):
+        assert _get_deployer_impl() == "dagobah"
+
+    @patch.dict(os.environ, {"METAFLOW_DEFAULT_FROM_DEPLOYMENT_IMPL": "argo-workflows"})
+    def test_env_var_dash_normalized_to_underscore(self):
+        assert _get_deployer_impl() == "argo_workflows"
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_auto_detects_maestro_first(self):
+        mock_provider_maestro = MagicMock()
+        mock_provider_maestro.TYPE = "maestro"
+        mock_provider_argo = MagicMock()
+        mock_provider_argo.TYPE = "argo-workflows"
+
+        with patch("metaflow.plugins.DEPLOYER_IMPL_PROVIDERS", [mock_provider_argo, mock_provider_maestro]):
+            # Remove env var if set
+            os.environ.pop("METAFLOW_DEFAULT_FROM_DEPLOYMENT_IMPL", None)
+            result = _get_deployer_impl()
+
+        assert result == "maestro"
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_auto_detects_argo_when_no_maestro(self):
+        mock_provider = MagicMock()
+        mock_provider.TYPE = "argo-workflows"
+
+        with patch("metaflow.plugins.DEPLOYER_IMPL_PROVIDERS", [mock_provider]):
+            os.environ.pop("METAFLOW_DEFAULT_FROM_DEPLOYMENT_IMPL", None)
+            result = _get_deployer_impl()
+
+        assert result == "argo_workflows"
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_falls_back_to_argo_when_import_fails(self):
+        with patch.dict("sys.modules", {"metaflow.plugins": None}):
+            os.environ.pop("METAFLOW_DEFAULT_FROM_DEPLOYMENT_IMPL", None)
+            result = _get_deployer_impl()
+
+        assert result == "argo_workflows"
