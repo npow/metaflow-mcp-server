@@ -42,6 +42,24 @@ def _json(obj):
 
 def _handle_errors(fn):
     """Catch exceptions and return structured error JSON instead of crashing."""
+    import asyncio
+
+    if asyncio.iscoroutinefunction(fn):
+
+        @wraps(fn)
+        async def async_wrapper(*args, **kwargs):
+            try:
+                return await fn(*args, **kwargs)
+            except Exception as e:
+                return _json(
+                    {
+                        "error": type(e).__name__,
+                        "message": str(e),
+                        "traceback": traceback.format_exc()[-1000:],
+                    }
+                )
+
+        return async_wrapper
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -95,6 +113,30 @@ def _filter_log(text, head=None, tail=None, pattern=None):
     elif head is not None:
         lines = lines[:head]
     return "".join(lines)
+
+
+def _get_deployer_impl(impl: str | None = None) -> str:
+    """Resolve the deployer implementation to use.
+
+    Priority: explicit arg > env var > auto-detect from registered providers.
+    """
+    if impl:
+        return impl
+    import os
+    env_impl = os.environ.get("METAFLOW_DEFAULT_FROM_DEPLOYMENT_IMPL")
+    if env_impl:
+        return env_impl.replace("-", "_")
+    try:
+        from metaflow.plugins import DEPLOYER_IMPL_PROVIDERS
+        available = [p.TYPE.replace("-", "_") for p in DEPLOYER_IMPL_PROVIDERS]
+        for preferred in ("maestro", "argo_workflows", "dagobah"):
+            if preferred in available:
+                return preferred
+        if available:
+            return available[0]
+    except ImportError:
+        pass
+    return "argo_workflows"
 
 
 def _extract_text_from_html(html: str) -> str:
@@ -1253,6 +1295,314 @@ def get_recent_runs(
     )
 
 
+# ── Tag Management ──────────────────────────────────────────
+
+
+@mcp.tool()
+@_handle_errors
+def add_run_tags(pathspec: str, tags: list[str]) -> str:
+    """Add user tags to a Metaflow run.
+
+    Tags are useful for marking runs (e.g. "production", "experiment-v2",
+    "approved") and can be used to filter runs in search_runs.
+
+    Args:
+        pathspec: Run pathspec like "FlowName/RunID".
+        tags: Tags to add (e.g. ["production", "reviewed"]).
+    """
+    from metaflow import Run
+    run = Run(pathspec)
+    run.add_tags(tags)
+    return _json({
+        "pathspec": pathspec,
+        "added": tags,
+        "current_tags": sorted(run.user_tags),
+    })
+
+
+@mcp.tool()
+@_handle_errors
+def remove_run_tags(pathspec: str, tags: list[str]) -> str:
+    """Remove user tags from a Metaflow run.
+
+    System tags cannot be removed. Removing a non-existent tag is a no-op.
+
+    Args:
+        pathspec: Run pathspec like "FlowName/RunID".
+        tags: Tags to remove.
+    """
+    from metaflow import Run
+    run = Run(pathspec)
+    run.remove_tags(tags)
+    return _json({
+        "pathspec": pathspec,
+        "removed": tags,
+        "current_tags": sorted(run.user_tags),
+    })
+
+
+# ── Deployment Management ───────────────────────────────────
+
+
+@mcp.tool()
+@_handle_errors
+def list_deployments(flow_name: str | None = None, impl: str | None = None) -> str:
+    """List Metaflow flows deployed to the configured orchestrator.
+
+    Discovers flows deployed via Deployer to Argo Workflows, Maestro,
+    or other supported backends.
+
+    Args:
+        flow_name: Only list deployments for this flow. If omitted, lists all.
+        impl: Orchestrator backend (e.g. "maestro", "argo_workflows").
+              Auto-detected if omitted.
+    """
+    from metaflow import DeployedFlow
+
+    resolved_impl = _get_deployer_impl(impl)
+    deployments = []
+    for df in DeployedFlow.list_deployed_flows(flow_name=flow_name, impl=resolved_impl):
+        info = {"type": type(df).__name__}
+        for attr in ("workflow_id", "cluster_name", "workflow_version",
+                     "name", "identifier", "flow_name"):
+            val = getattr(df, attr, None)
+            if val is not None:
+                info[attr] = str(val)
+        deployments.append(info)
+
+    return _json({
+        "flow_name": flow_name,
+        "impl": resolved_impl,
+        "count": len(deployments),
+        "deployments": deployments,
+    })
+
+
+@mcp.tool()
+@_handle_errors
+def trigger_run(
+    identifier: str,
+    parameters: dict[str, str] | None = None,
+    impl: str | None = None,
+) -> str:
+    """Trigger a new run for a deployed Metaflow flow.
+
+    Connects to an existing deployment and triggers a new run. The flow
+    must already be deployed via Deployer. Use list_deployments to
+    discover available deployments and their identifiers.
+
+    The run is triggered asynchronously -- this returns immediately with
+    tracking identifiers. Use get_triggered_run_status to poll, or
+    get_run with the Metaflow pathspec once the start step completes.
+
+    Args:
+        identifier: Deployment identifier from list_deployments
+                    (e.g. Maestro workflow_id like
+                    "myproject.test.staging.TrainFlow").
+        parameters: Optional flow parameter overrides as key-value pairs
+                   (e.g. {"learning_rate": "0.01", "epochs": "10"}).
+                   Unspecified parameters use deployed defaults.
+        impl: Orchestrator backend. Auto-detected if omitted.
+    """
+    from metaflow import DeployedFlow
+
+    resolved_impl = _get_deployer_impl(impl)
+    df = DeployedFlow.from_deployment(identifier, impl=resolved_impl)
+    triggered = df.run(**(parameters or {}))
+
+    result = {"identifier": identifier, "impl": resolved_impl, "action": "triggered"}
+    for attr in ("workflow_id", "workflow_instance_id", "workflow_run_id",
+                 "workflow_version", "status", "cluster_name"):
+        try:
+            val = getattr(triggered, attr)
+            if val is not None:
+                result[attr] = str(val)
+        except (AttributeError, Exception):
+            pass
+    for attr in ("maestro_ui", "metaflow_ui"):
+        try:
+            val = getattr(triggered, attr)
+            if val is not None:
+                result[attr] = str(val)
+        except (AttributeError, Exception):
+            pass
+
+    return _json(result)
+
+
+@mcp.tool()
+@_handle_errors
+def get_triggered_run_status(
+    identifier: str,
+    run_id: str,
+    impl: str | None = None,
+) -> str:
+    """Check the status of a previously triggered run.
+
+    Args:
+        identifier: Deployment identifier (same as passed to trigger_run).
+        run_id: Run ID returned by trigger_run (the workflow_run_id or
+                workflow_instance_id field).
+        impl: Orchestrator backend. Auto-detected if omitted.
+    """
+    from metaflow import DeployedFlow
+
+    resolved_impl = _get_deployer_impl(impl)
+    triggered = DeployedFlow.get_triggered_run(
+        identifier, run_id, impl=resolved_impl
+    )
+
+    result = {"identifier": identifier, "run_id": run_id, "impl": resolved_impl}
+    for attr in ("status", "workflow_id", "workflow_instance_id",
+                 "workflow_run_id", "workflow_version", "cluster_name"):
+        try:
+            val = getattr(triggered, attr)
+            if val is not None:
+                result[attr] = str(val)
+        except (AttributeError, Exception):
+            pass
+    for attr in ("maestro_ui", "metaflow_ui"):
+        try:
+            val = getattr(triggered, attr)
+            if val is not None:
+                result[attr] = str(val)
+        except (AttributeError, Exception):
+            pass
+
+    try:
+        mf_run = triggered.run
+        if mf_run is not None:
+            result["metaflow_pathspec"] = mf_run.pathspec
+            result["successful"] = mf_run.successful
+            result["finished"] = mf_run.finished
+    except Exception:
+        result["metaflow_run"] = "not yet available (start step has not begun)"
+
+    return _json(result)
+
+
+@mcp.tool()
+@_handle_errors
+def terminate_run(
+    identifier: str,
+    run_id: str,
+    impl: str | None = None,
+) -> str:
+    """Terminate a running triggered run.
+
+    Stops the workflow on the orchestrator. This is irreversible.
+
+    Args:
+        identifier: Deployment identifier (same as passed to trigger_run).
+        run_id: Run ID to terminate.
+        impl: Orchestrator backend. Auto-detected if omitted.
+    """
+    from metaflow import DeployedFlow
+
+    resolved_impl = _get_deployer_impl(impl)
+    triggered = DeployedFlow.get_triggered_run(
+        identifier, run_id, impl=resolved_impl
+    )
+    triggered.terminate()
+
+    result = {
+        "identifier": identifier,
+        "run_id": run_id,
+        "impl": resolved_impl,
+        "action": "terminated",
+    }
+    try:
+        result["status"] = str(triggered.status)
+    except Exception:
+        pass
+
+    return _json(result)
+
+
+# ── Local Execution (Runner) ────────────────────────────────
+
+
+@mcp.tool()
+@_handle_errors
+async def run_flow(
+    flow_file: str,
+    parameters: dict[str, str] | None = None,
+    tags: list[str] | None = None,
+    max_workers: int | None = None,
+) -> str:
+    """Run a Metaflow flow from a local source file.
+
+    Starts execution and returns once the run ID is assigned. The flow
+    continues running as a subprocess. Use get_run to monitor progress.
+
+    Requires the flow source file on the local filesystem -- only works
+    when the MCP server has access to the flow code (e.g. local dev).
+
+    Args:
+        flow_file: Path to the flow Python file (e.g. "./myflow.py").
+        parameters: Optional flow parameter overrides (e.g.
+                   {"learning_rate": "0.01"}). Keys are parameter names.
+        tags: Optional tags to apply to the run.
+        max_workers: Max parallel workers for foreach steps.
+    """
+    from metaflow import Runner
+
+    kwargs = {}
+    if tags:
+        kwargs["tag"] = tags
+    if max_workers is not None:
+        kwargs["max_workers"] = max_workers
+    if parameters:
+        kwargs.update(parameters)
+
+    runner = Runner(flow_file, show_output=False)
+    executing = await runner.async_run(**kwargs)
+
+    return _json({
+        "flow_file": flow_file,
+        "action": "started",
+        "pathspec": executing.run.pathspec,
+        "run_id": executing.run.id,
+        "status": executing.status,
+    })
+
+
+@mcp.tool()
+@_handle_errors
+async def resume_run(
+    flow_file: str,
+    origin_run_id: str,
+) -> str:
+    """Resume a failed Metaflow run from the point of failure.
+
+    Starts a new run that reuses results from successful steps of the
+    original run and re-executes from the failed step onward.
+
+    Returns once the new run ID is assigned. The resumed flow continues
+    running as a subprocess. Use get_run to monitor progress.
+
+    Requires the flow source file on the local filesystem.
+
+    Args:
+        flow_file: Path to the flow Python file.
+        origin_run_id: Run ID to resume from (e.g. "1715234567890").
+                      Use get_run or get_latest_failure to find this.
+    """
+    from metaflow import Runner
+
+    runner = Runner(flow_file, show_output=False)
+    executing = await runner.async_resume(origin_run_id=origin_run_id)
+
+    return _json({
+        "flow_file": flow_file,
+        "action": "resumed",
+        "origin_run_id": origin_run_id,
+        "pathspec": executing.run.pathspec,
+        "run_id": executing.run.id,
+        "status": executing.status,
+    })
+
+
 def get_tool_schemas() -> list[dict]:
     """Return name, signature, and docstring for all registered MCP tools.
 
@@ -1282,6 +1632,14 @@ def get_tool_schemas() -> list[dict]:
         get_recent_runs,
         get_source_code,
         get_environment,
+        add_run_tags,
+        remove_run_tags,
+        list_deployments,
+        trigger_run,
+        get_triggered_run_status,
+        terminate_run,
+        run_flow,
+        resume_run,
     ]
     schemas = []
     for fn in tool_fns:

@@ -8,10 +8,30 @@ and skipped in CI unless METAFLOW_MCP_INTEGRATION=1 is set.
 import asyncio
 import json
 import os
+import unittest
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
-from metaflow_mcp_server.server import mcp, _filter_log, _parse_dt, _ensure_tz, _duration, _extract_text_from_html, _get_env_from_task, _apply_package_filters
+from metaflow_mcp_server.server import (
+    mcp,
+    _filter_log,
+    _parse_dt,
+    _ensure_tz,
+    _duration,
+    _extract_text_from_html,
+    _get_env_from_task,
+    _apply_package_filters,
+    _get_deployer_impl,
+    add_run_tags,
+    remove_run_tags,
+    list_deployments,
+    trigger_run,
+    get_triggered_run_status,
+    terminate_run,
+    run_flow,
+    resume_run,
+)
 
 INTEGRATION = os.environ.get("METAFLOW_MCP_INTEGRATION") == "1"
 
@@ -53,6 +73,14 @@ class TestToolRegistration:
             "get_recent_runs",
             "get_source_code",
             "get_environment",
+            "add_run_tags",
+            "remove_run_tags",
+            "list_deployments",
+            "trigger_run",
+            "get_triggered_run_status",
+            "terminate_run",
+            "run_flow",
+            "resume_run",
         }
         assert expected == names
 
