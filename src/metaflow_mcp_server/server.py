@@ -617,6 +617,19 @@ def get_task_logs(
         result["stderr"] = _filter_log(
             task.stderr, head=head, tail=tail, pattern=pattern
         )
+
+    stdout_empty = not (result.get("stdout") or "").strip()
+    stderr_empty = not (result.get("stderr") or "").strip()
+    if stdout_empty and stderr_empty and not task.successful:
+        run_pathspec = "/".join(pathspec.split("/")[:2])
+        result["hint"] = (
+            "Both stdout and stderr are empty for this failed task. "
+            "This is typically a bootstrap or container-init failure "
+            "(crash before Metaflow logging starts). "
+            f"Use get_bootstrap_failure('{run_pathspec}') to cross-reference "
+            "Titus container state and orchestrator logs for diagnosis."
+        )
+
     return _json(result)
 
 
@@ -1112,6 +1125,200 @@ def get_source_code(
             "flowspec": code.flowspec,
             "files": file_list,
         })
+
+
+def _diff_run_metadata(run_a, run_b):
+    """Compare metadata between two runs: tags, parameters, system info."""
+    diffs = {}
+
+    tags_a = sorted(run_a.user_tags)
+    tags_b = sorted(run_b.user_tags)
+    if tags_a != tags_b:
+        diffs["tags"] = {"source": tags_a, "target": tags_b,
+                         "added": sorted(set(tags_b) - set(tags_a)),
+                         "removed": sorted(set(tags_a) - set(tags_b))}
+
+    sys_a = {t.split(":")[0]: t.split(":", 1)[1] for t in run_a.system_tags if ":" in t}
+    sys_b = {t.split(":")[0]: t.split(":", 1)[1] for t in run_b.system_tags if ":" in t}
+    sys_diffs = {}
+    for key in sorted(set(sys_a) | set(sys_b)):
+        va, vb = sys_a.get(key), sys_b.get(key)
+        if va != vb:
+            sys_diffs[key] = {"source": va, "target": vb}
+    if sys_diffs:
+        diffs["system_tags"] = sys_diffs
+
+    def _get_params(run):
+        try:
+            start = next(s for s in run if s.id == "start")
+            task = next(iter(start))
+            params = {}
+            for art in task:
+                if art.id.startswith("_") or art.id in ("name",):
+                    continue
+                try:
+                    data = art.data
+                    val = repr(data)
+                    if len(val) > 500:
+                        val = val[:500] + "... (truncated)"
+                    params[art.id] = val
+                except (MemoryError, Exception):
+                    params[art.id] = f"<unreadable: {type(art.data).__name__}>"
+            return params
+        except (StopIteration, Exception):
+            return {}
+
+    params_a = _get_params(run_a)
+    params_b = _get_params(run_b)
+    if params_a or params_b:
+        param_diffs = {}
+        for key in sorted(set(params_a) | set(params_b)):
+            va, vb = params_a.get(key), params_b.get(key)
+            if va != vb:
+                param_diffs[key] = {"source": va, "target": vb}
+        if param_diffs:
+            diffs["parameters"] = param_diffs
+
+    return diffs
+
+
+def _diff_environments(run_a, run_b, flow_name_a, flow_name_b=None):
+    """Compare conda/pypi environments between two runs."""
+    if flow_name_b is None:
+        flow_name_b = flow_name_a
+
+    def _get_env(run, flow_name):
+        for step in run:
+            for task in step:
+                env, source = _get_env_from_task(task, flow_name)
+                if env:
+                    return env, source
+                break
+        return None, None
+
+    env_a, src_a = _get_env(run_a, flow_name_a)
+    env_b, src_b = _get_env(run_b, flow_name_b)
+
+    if not env_a and not env_b:
+        return None
+
+    if env_a and not env_b:
+        return {"source": f"has environment ({src_a})", "target": "no environment"}
+    if env_b and not env_a:
+        return {"source": "no environment", "target": f"has environment ({src_b})"}
+
+    diffs = {}
+    pkgs_a = {p["name"]: p.get("version") or p.get("url", "") for p in env_a.get("packages", [])}
+    pkgs_b = {p["name"]: p.get("version") or p.get("url", "") for p in env_b.get("packages", [])}
+    added = sorted(set(pkgs_b) - set(pkgs_a))
+    removed = sorted(set(pkgs_a) - set(pkgs_b))
+    changed = sorted(k for k in set(pkgs_a) & set(pkgs_b) if pkgs_a[k] != pkgs_b[k])
+
+    MAX_PKG_DIFF = 50
+    if added:
+        diffs["added"] = {k: pkgs_b[k] for k in added[:MAX_PKG_DIFF]}
+        if len(added) > MAX_PKG_DIFF:
+            diffs["added_truncated"] = f"{len(added)} total, showing first {MAX_PKG_DIFF}"
+    if removed:
+        diffs["removed"] = {k: pkgs_a[k] for k in removed[:MAX_PKG_DIFF]}
+        if len(removed) > MAX_PKG_DIFF:
+            diffs["removed_truncated"] = f"{len(removed)} total, showing first {MAX_PKG_DIFF}"
+    if changed:
+        diffs["changed"] = {k: {"source": pkgs_a[k], "target": pkgs_b[k]} for k in changed[:MAX_PKG_DIFF]}
+        if len(changed) > MAX_PKG_DIFF:
+            diffs["changed_truncated"] = f"{len(changed)} total, showing first {MAX_PKG_DIFF}"
+
+    for field in ("req_id", "full_id", "env_type", "arch"):
+        va = env_a.get(field)
+        vb = env_b.get(field)
+        if va != vb and (va or vb):
+            diffs[field] = {"source": va, "target": vb}
+
+    user_deps_a = env_a.get("user_deps", [])
+    user_deps_b = env_b.get("user_deps", [])
+    if user_deps_a != user_deps_b:
+        diffs["user_deps"] = {"source": user_deps_a, "target": user_deps_b}
+
+    return diffs or None
+
+
+@mcp.tool()
+@_handle_errors
+def diff_runs(
+    source_pathspec: str,
+    target_pathspec: str,
+) -> str:
+    """Compare two Metaflow runs: source code, parameters, environment, and system metadata.
+
+    Produces a structured diff showing what changed between two runs of the
+    same flow. Useful for debugging regressions, understanding why a run
+    succeeded when another failed, or auditing parameter/dependency changes.
+
+    Sections in the diff:
+      - code: unified diff of the source code snapshots
+      - metadata: tags, system tags (metaflow version, runtime, etc.)
+      - parameters: flow parameter values
+      - environment: conda/pypi package additions, removals, and version changes
+
+    Args:
+        source_pathspec: Run pathspec for the "before" run (e.g. "MyFlow/100").
+        target_pathspec: Run pathspec for the "after" run (e.g. "MyFlow/101").
+    """
+    import subprocess
+    from metaflow import Run
+
+    run_a = Run(source_pathspec)
+    run_b = Run(target_pathspec)
+    flow_name_a = source_pathspec.split("/")[0]
+    flow_name_b = target_pathspec.split("/")[0]
+
+    result = {"source": source_pathspec, "target": target_pathspec, "sections": {}}
+
+    # Source code diff
+    MAX_CODE_DIFF = 20_000
+    cmd = ["metaflow", "code", "diff-runs", source_pathspec, target_pathspec]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        code_diff = proc.stdout or ""
+        if proc.returncode != 0 and not code_diff.strip():
+            result["sections"]["code"] = f"metaflow code diff-runs failed (rc={proc.returncode}): {(proc.stderr or '')[:500]}"
+        elif code_diff.strip():
+            if len(code_diff) > MAX_CODE_DIFF:
+                code_diff = code_diff[:MAX_CODE_DIFF] + \
+                    f"\n... (truncated, {len(code_diff)} chars total — use get_source_code on each run for full files)"
+            result["sections"]["code"] = code_diff
+    except Exception as e:
+        result["sections"]["code"] = f"metaflow code diff-runs error: {e}"
+
+    # Metadata diff (tags, system tags, parameters)
+    meta_diffs = _diff_run_metadata(run_a, run_b)
+    if meta_diffs.get("parameters"):
+        result["sections"]["parameters"] = meta_diffs.pop("parameters")
+    if meta_diffs:
+        result["sections"]["metadata"] = meta_diffs
+
+    # Environment diff (conda/pypi packages)
+    env_diffs = _diff_environments(run_a, run_b, flow_name_a, flow_name_b)
+    if env_diffs:
+        result["sections"]["environment"] = env_diffs
+
+    # Run-level summary
+    result["summary"] = {
+        "source": {
+            "successful": run_a.successful, "finished": run_a.finished,
+            "created_at": str(run_a.created_at),
+        },
+        "target": {
+            "successful": run_b.successful, "finished": run_b.finished,
+            "created_at": str(run_b.created_at),
+        },
+        "sections_with_diffs": [s for s in result["sections"] if result["sections"][s]],
+    }
+
+    if not result["summary"]["sections_with_diffs"]:
+        result["summary"]["note"] = "No differences detected between the two runs."
+
+    return _json(result)
 
 
 # ── Environment Inspection ──────────────────────────────────
@@ -1627,6 +1834,7 @@ def get_tool_schemas() -> list[dict]:
         search_artifacts,
         get_recent_runs,
         get_source_code,
+        diff_runs,
         get_environment,
         add_run_tags,
         remove_run_tags,

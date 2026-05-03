@@ -23,6 +23,8 @@ from metaflow_mcp_server.server import (
     _get_env_from_task,
     _apply_package_filters,
     _get_deployer_impl,
+    _diff_run_metadata,
+    _diff_environments,
     add_run_tags,
     remove_run_tags,
     list_deployments,
@@ -31,6 +33,8 @@ from metaflow_mcp_server.server import (
     terminate_run,
     run_flow,
     resume_run,
+    diff_runs,
+    get_task_logs,
 )
 
 INTEGRATION = os.environ.get("METAFLOW_MCP_INTEGRATION") == "1"
@@ -81,6 +85,7 @@ class TestToolRegistration:
             "terminate_run",
             "run_flow",
             "resume_run",
+            "diff_runs",
         }
         assert expected == names
 
@@ -1066,3 +1071,283 @@ class TestGetDeployerImpl(unittest.TestCase):
             result = _get_deployer_impl()
 
         assert result == "argo_workflows"
+
+
+# ── diff_runs tests ──────────────────────────────────────────────────────────
+
+
+def _make_mock_run(user_tags=None, system_tags=None, successful=True, finished=True,
+                   created_at="2024-01-01T00:00:00", steps=None):
+    run = MagicMock()
+    run.user_tags = set(user_tags or [])
+    run.system_tags = set(system_tags or [])
+    run.successful = successful
+    run.finished = finished
+    run.created_at = created_at
+    run.__iter__ = MagicMock(return_value=iter(steps or []))
+    return run
+
+
+def _make_mock_step(step_id, artifacts=None):
+    step = MagicMock()
+    step.id = step_id
+    task = MagicMock()
+    art_list = []
+    for name, value in (artifacts or {}).items():
+        art = MagicMock()
+        art.id = name
+        art.data = value
+        art_list.append(art)
+    task.__iter__ = MagicMock(return_value=iter(art_list))
+    step.__iter__ = MagicMock(return_value=iter([task]))
+    return step
+
+
+class TestDiffRunMetadata(unittest.TestCase):
+    def test_identical_runs_no_diffs(self):
+        run_a = _make_mock_run(user_tags=["prod"], system_tags=["metaflow_version:2.19"])
+        run_b = _make_mock_run(user_tags=["prod"], system_tags=["metaflow_version:2.19"])
+        diffs = _diff_run_metadata(run_a, run_b)
+        assert diffs == {}
+
+    def test_tag_changes_detected(self):
+        run_a = _make_mock_run(user_tags=["v1", "experiment"])
+        run_b = _make_mock_run(user_tags=["v2", "experiment"])
+        diffs = _diff_run_metadata(run_a, run_b)
+        assert "tags" in diffs
+        assert "v1" in diffs["tags"]["removed"]
+        assert "v2" in diffs["tags"]["added"]
+
+    def test_system_tag_changes_detected(self):
+        run_a = _make_mock_run(system_tags=["metaflow_version:2.18", "runtime:dev"])
+        run_b = _make_mock_run(system_tags=["metaflow_version:2.19", "runtime:dev"])
+        diffs = _diff_run_metadata(run_a, run_b)
+        assert "system_tags" in diffs
+        assert diffs["system_tags"]["metaflow_version"]["source"] == "2.18"
+        assert diffs["system_tags"]["metaflow_version"]["target"] == "2.19"
+        assert "runtime" not in diffs["system_tags"]
+
+    def test_parameter_changes_detected(self):
+        step_a = _make_mock_step("start", {"lr": 0.01, "epochs": 10})
+        step_b = _make_mock_step("start", {"lr": 0.001, "epochs": 10})
+        run_a = _make_mock_run(steps=[step_a])
+        run_b = _make_mock_run(steps=[step_b])
+        diffs = _diff_run_metadata(run_a, run_b)
+        assert "parameters" in diffs
+        assert "lr" in diffs["parameters"]
+        assert "epochs" not in diffs["parameters"]
+
+    def test_parameter_value_truncated(self):
+        big_val = "x" * 1000
+        step_a = _make_mock_step("start", {"data": big_val})
+        step_b = _make_mock_step("start", {"data": "small"})
+        run_a = _make_mock_run(steps=[step_a])
+        run_b = _make_mock_run(steps=[step_b])
+        diffs = _diff_run_metadata(run_a, run_b)
+        assert "truncated" in diffs["parameters"]["data"]["source"]
+
+    def test_internal_artifacts_excluded(self):
+        step_a = _make_mock_step("start", {"_internal": "x", "name": "flow", "lr": 0.01})
+        step_b = _make_mock_step("start", {"_internal": "x", "name": "flow", "lr": 0.01})
+        run_a = _make_mock_run(steps=[step_a])
+        run_b = _make_mock_run(steps=[step_b])
+        diffs = _diff_run_metadata(run_a, run_b)
+        assert "parameters" not in diffs
+
+
+class TestDiffEnvironments(unittest.TestCase):
+    def test_both_none_returns_none(self):
+        run_a = _make_mock_run()
+        run_b = _make_mock_run()
+        with patch("metaflow_mcp_server.server._get_env_from_task", return_value=(None, None)):
+            result = _diff_environments(run_a, run_b, "Flow")
+        assert result is None
+
+    def test_one_has_env_other_doesnt(self):
+        run_a = _make_mock_run(steps=[_make_mock_step("start")])
+        run_b = _make_mock_run(steps=[_make_mock_step("start")])
+
+        call_count = [0]
+        def _side_effect(task, flow_name):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"packages": [{"name": "numpy", "version": "1.26"}]}, "netflix"
+            return None, None
+
+        with patch("metaflow_mcp_server.server._get_env_from_task", side_effect=_side_effect):
+            result = _diff_environments(run_a, run_b, "Flow")
+        assert "no environment" in result["target"]
+
+    def test_package_added(self):
+        env_a = {"packages": [{"name": "numpy", "version": "1.26"}]}
+        env_b = {"packages": [{"name": "numpy", "version": "1.26"}, {"name": "pandas", "version": "2.0"}]}
+        run_a = _make_mock_run(steps=[_make_mock_step("start")])
+        run_b = _make_mock_run(steps=[_make_mock_step("start")])
+
+        call_count = [0]
+        def _side_effect(task, flow_name):
+            call_count[0] += 1
+            return (env_a, "netflix") if call_count[0] == 1 else (env_b, "netflix")
+
+        with patch("metaflow_mcp_server.server._get_env_from_task", side_effect=_side_effect):
+            result = _diff_environments(run_a, run_b, "Flow")
+        assert "pandas" in result["added"]
+
+    def test_package_version_changed(self):
+        env_a = {"packages": [{"name": "numpy", "version": "1.25"}]}
+        env_b = {"packages": [{"name": "numpy", "version": "1.26"}]}
+        run_a = _make_mock_run(steps=[_make_mock_step("start")])
+        run_b = _make_mock_run(steps=[_make_mock_step("start")])
+
+        call_count = [0]
+        def _side_effect(task, flow_name):
+            call_count[0] += 1
+            return (env_a, "netflix") if call_count[0] == 1 else (env_b, "netflix")
+
+        with patch("metaflow_mcp_server.server._get_env_from_task", side_effect=_side_effect):
+            result = _diff_environments(run_a, run_b, "Flow")
+        assert "numpy" in result["changed"]
+        assert result["changed"]["numpy"]["source"] == "1.25"
+        assert result["changed"]["numpy"]["target"] == "1.26"
+
+    def test_package_removed(self):
+        env_a = {"packages": [{"name": "numpy", "version": "1.26"}, {"name": "scipy", "version": "1.0"}]}
+        env_b = {"packages": [{"name": "numpy", "version": "1.26"}]}
+        run_a = _make_mock_run(steps=[_make_mock_step("start")])
+        run_b = _make_mock_run(steps=[_make_mock_step("start")])
+
+        call_count = [0]
+        def _side_effect(task, flow_name):
+            call_count[0] += 1
+            return (env_a, "netflix") if call_count[0] == 1 else (env_b, "netflix")
+
+        with patch("metaflow_mcp_server.server._get_env_from_task", side_effect=_side_effect):
+            result = _diff_environments(run_a, run_b, "Flow")
+        assert "scipy" in result["removed"]
+
+    def test_no_package_diff_returns_none(self):
+        env = {"packages": [{"name": "numpy", "version": "1.26"}]}
+        run_a = _make_mock_run(steps=[_make_mock_step("start")])
+        run_b = _make_mock_run(steps=[_make_mock_step("start")])
+
+        with patch("metaflow_mcp_server.server._get_env_from_task", return_value=(env, "netflix")):
+            result = _diff_environments(run_a, run_b, "Flow")
+        assert result is None
+
+
+class TestDiffRuns(unittest.TestCase):
+    @patch("subprocess.run")
+    @patch("metaflow.Run")
+    def test_diff_runs_no_differences(self, mock_run_cls, mock_subprocess):
+        run = _make_mock_run(user_tags=["v1"], system_tags=["metaflow_version:2.19"])
+        mock_run_cls.return_value = run
+        mock_subprocess.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        with patch("metaflow_mcp_server.server._get_env_from_task", return_value=(None, None)):
+            result = json.loads(diff_runs("Flow/100", "Flow/101"))
+
+        assert result["source"] == "Flow/100"
+        assert result["target"] == "Flow/101"
+        assert result["summary"]["sections_with_diffs"] == []
+        assert "No differences" in result["summary"]["note"]
+
+    @patch("subprocess.run")
+    @patch("metaflow.Run")
+    def test_diff_runs_code_diff_present(self, mock_run_cls, mock_subprocess):
+        run = _make_mock_run()
+        mock_run_cls.return_value = run
+        mock_subprocess.return_value = MagicMock(
+            stdout="--- a/flow.py\n+++ b/flow.py\n@@ -1 +1 @@\n-old\n+new\n",
+            stderr="", returncode=0
+        )
+
+        with patch("metaflow_mcp_server.server._get_env_from_task", return_value=(None, None)):
+            result = json.loads(diff_runs("Flow/100", "Flow/101"))
+
+        assert "code" in result["sections"]
+        assert "-old" in result["sections"]["code"]
+        assert "+new" in result["sections"]["code"]
+
+    @patch("subprocess.run")
+    @patch("metaflow.Run")
+    def test_diff_runs_code_diff_truncated(self, mock_run_cls, mock_subprocess):
+        run = _make_mock_run()
+        mock_run_cls.return_value = run
+        huge_diff = "x" * 30_000
+        mock_subprocess.return_value = MagicMock(stdout=huge_diff, stderr="", returncode=0)
+
+        with patch("metaflow_mcp_server.server._get_env_from_task", return_value=(None, None)):
+            result = json.loads(diff_runs("Flow/100", "Flow/101"))
+
+        assert "truncated" in result["sections"]["code"]
+        assert len(result["sections"]["code"]) < 25_000
+
+    @patch("subprocess.run")
+    @patch("metaflow.Run")
+    def test_diff_runs_parameter_diff(self, mock_run_cls, mock_subprocess):
+        step_a = _make_mock_step("start", {"lr": 0.01})
+        step_b = _make_mock_step("start", {"lr": 0.001})
+        run_a = _make_mock_run(steps=[step_a])
+        run_b = _make_mock_run(steps=[step_b])
+        mock_run_cls.side_effect = [run_a, run_b]
+        mock_subprocess.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        with patch("metaflow_mcp_server.server._get_env_from_task", return_value=(None, None)):
+            result = json.loads(diff_runs("Flow/100", "Flow/101"))
+
+        assert "parameters" in result["sections"]
+        assert "lr" in result["sections"]["parameters"]
+
+    @patch("subprocess.run")
+    @patch("metaflow.Run")
+    def test_diff_runs_summary_shows_run_status(self, mock_run_cls, mock_subprocess):
+        run_a = _make_mock_run(successful=True)
+        run_b = _make_mock_run(successful=False)
+        mock_run_cls.side_effect = [run_a, run_b]
+        mock_subprocess.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        with patch("metaflow_mcp_server.server._get_env_from_task", return_value=(None, None)):
+            result = json.loads(diff_runs("Flow/100", "Flow/101"))
+
+        assert result["summary"]["source"]["successful"] is True
+        assert result["summary"]["target"]["successful"] is False
+
+
+# ── get_task_logs hint test ──────────────────────────────────────────────────
+
+
+class TestGetTaskLogsHint(unittest.TestCase):
+    @patch("metaflow.Task")
+    def test_hint_shown_when_empty_logs_and_failed(self, mock_task_cls):
+        task = MagicMock()
+        task.stdout = ""
+        task.stderr = ""
+        task.successful = False
+        mock_task_cls.return_value = task
+
+        result = json.loads(get_task_logs("Flow/1/start/1"))
+        assert "hint" in result
+        assert "get_bootstrap_failure" in result["hint"]
+        assert "Flow/1" in result["hint"]
+
+    @patch("metaflow.Task")
+    def test_no_hint_when_logs_exist(self, mock_task_cls):
+        task = MagicMock()
+        task.stdout = "some output"
+        task.stderr = ""
+        task.successful = False
+        mock_task_cls.return_value = task
+
+        result = json.loads(get_task_logs("Flow/1/start/1"))
+        assert "hint" not in result
+
+    @patch("metaflow.Task")
+    def test_no_hint_when_successful(self, mock_task_cls):
+        task = MagicMock()
+        task.stdout = ""
+        task.stderr = ""
+        task.successful = True
+        mock_task_cls.return_value = task
+
+        result = json.loads(get_task_logs("Flow/1/start/1"))
+        assert "hint" not in result
