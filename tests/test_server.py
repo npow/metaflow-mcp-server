@@ -160,6 +160,14 @@ class TestToolRegistration:
         assert "card_index" in props
         assert "card_type" in props
         assert "card_id" in props
+        assert "include_html" in props
+
+    def test_get_run_has_summary_param(self):
+        tools = asyncio.get_event_loop().run_until_complete(mcp.list_tools())
+        tool = next(t for t in tools if t.name == "get_run")
+        props = tool.inputSchema["properties"]
+        assert "pathspec" in props
+        assert "summary" in props
 
     def test_compare_cards_has_params(self):
         tools = asyncio.get_event_loop().run_until_complete(mcp.list_tools())
@@ -314,6 +322,10 @@ class TestGetEnvironment:
         assert result["req_id"] == "abc123"
         assert result["full_id"] == "def456"
         assert result["arch"] == "linux-64"
+        # Fallback must explain *why* the netflix path failed, not silently
+        # return note-only — the caller needs to distinguish "ext not
+        # installed" from "code-package missing" from real exceptions.
+        assert "error" in result
 
     def test_get_env_from_task_metadata_only_oss(self):
         """Task with conda_env_prefix but CondaEnvironment import fails falls back to metadata_only."""
@@ -329,6 +341,43 @@ class TestGetEnvironment:
         assert source in ("oss", "metadata_only")
         if source == "metadata_only":
             assert result["conda_env_prefix"] == "metaflow/abc123/linux-64"
+
+    def test_get_env_from_task_oss_path_exception_surfaces_error(self):
+        """OSS conda fallback must carry the exception text, not just a generic note."""
+        from unittest.mock import MagicMock, patch
+        metadata_entry = MagicMock()
+        metadata_entry.field = "conda_env_prefix"
+        metadata_entry.value = "metaflow/abc123/linux-64"
+        task = MagicMock()
+        task.metadata = [metadata_entry]
+
+        with patch(
+            "metaflow.plugins.pypi.conda_environment.CondaEnvironment.get_client_info",
+            side_effect=RuntimeError("manifest corrupt"),
+        ):
+            result, source = _get_env_from_task(task, "TestFlow")
+
+        assert source == "metadata_only"
+        assert result["conda_env_prefix"] == "metaflow/abc123/linux-64"
+        assert "manifest corrupt" in result["error"]
+
+    def test_get_env_from_task_oss_path_empty_client_info_surfaces_reason(self):
+        """get_client_info returning empty must be distinguishable from an exception."""
+        from unittest.mock import MagicMock, patch
+        metadata_entry = MagicMock()
+        metadata_entry.field = "conda_env_prefix"
+        metadata_entry.value = "metaflow/abc123/linux-64"
+        task = MagicMock()
+        task.metadata = [metadata_entry]
+
+        with patch(
+            "metaflow.plugins.pypi.conda_environment.CondaEnvironment.get_client_info",
+            return_value=None,
+        ):
+            result, source = _get_env_from_task(task, "TestFlow")
+
+        assert source == "metadata_only"
+        assert "returned empty" in result["error"]
 
     def test_get_env_from_task_netflix_with_mock_resolved_env(self):
         """Netflix path with full ResolvedEnvironment extraction."""
@@ -477,6 +526,241 @@ class TestGetEnvironment:
         result = {"req_id": "abc"}
         _apply_package_filters(result, "pypi", None, 10)
         assert "packages" not in result
+
+
+class TestSilentFailureSurfacing:
+    """Failures inside tools must surface in the response, never be swallowed.
+
+    These tests lock in the contract that helpers expose errors via dedicated
+    fields (type_error, files_error, error, partial_failure) rather than
+    returning empty results indistinguishable from "no data."
+    """
+
+    def test_list_artifacts_surfaces_data_deserialization_error(self):
+        """art.data failing → type_error field, not silent 'unknown'."""
+        from unittest.mock import MagicMock, patch
+        from metaflow_mcp_server.server import list_artifacts
+
+        good_art = MagicMock(id="ok", sha="sha1", created_at="2026-01-01")
+        good_art.data = "value"
+
+        bad_art = MagicMock(id="bad", sha="sha2", created_at="2026-01-01")
+        type(bad_art).data = property(
+            lambda self: (_ for _ in ()).throw(IOError("S3 timeout"))
+        )
+
+        task = MagicMock(pathspec="F/1/s/0")
+        task.__iter__ = lambda self: iter([good_art, bad_art])
+
+        with patch("metaflow.Task", return_value=task):
+            result = json.loads(list_artifacts("F/1/s/0"))
+
+        by_name = {a["name"]: a for a in result["artifacts"]}
+        assert by_name["ok"]["type"] == "str"
+        assert "type_error" not in by_name["ok"]
+        assert by_name["bad"]["type"] == "unknown"
+        assert "S3 timeout" in by_name["bad"]["type_error"]
+
+    def test_get_source_code_surfaces_tarball_error(self):
+        """tarball iteration failing → files_error field, not silent empty list."""
+        from unittest.mock import MagicMock, patch
+        from metaflow_mcp_server.server import get_source_code
+
+        code = MagicMock()
+        code.flowspec = "from metaflow import FlowSpec\n"
+        code.info = {"script": "myflow.py"}
+        # Accessing .tarball raises — exercise the new error path.
+        type(code).tarball = property(
+            lambda self: (_ for _ in ()).throw(RuntimeError("tarball corrupt"))
+        )
+
+        run = MagicMock(code=code)
+        with patch("metaflow.Run", return_value=run):
+            result = json.loads(get_source_code("F/1"))
+
+        assert result["files"] == []
+        assert "tarball corrupt" in result["files_error"]
+        assert result["flowspec"].startswith("from metaflow")
+
+    def test_search_runs_scan_limit_hit_visible(self):
+        """When > 200 runs are scanned with no match, caller must see scan_limit_hit."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+        from metaflow_mcp_server.server import search_runs
+
+        dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        end_dt = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+        # 250 runs all marked unfinished so the "successful" filter never matches,
+        # exhausting the MAX_SCAN budget.
+        runs = []
+        for i in range(250):
+            r = MagicMock(
+                pathspec=f"F/{i}", id=str(i), successful=False, finished=False,
+                created_at=dt, finished_at=end_dt, user_tags=set(),
+            )
+            runs.append(r)
+
+        flow = MagicMock()
+        flow.__iter__ = lambda self: iter(runs)
+        with patch("metaflow.Flow", return_value=flow), \
+             patch("metaflow.namespace"):
+            result = json.loads(
+                search_runs("F", last_n=5, status="successful")
+            )
+
+        assert result["count"] == 0
+        assert result["scan_limit_hit"] is True
+        assert result["scan_limit"] == 200
+        assert result["scanned"] == 200
+
+    def test_search_runs_scan_limit_not_hit_when_few_runs(self):
+        """Few runs → scan_limit_hit is False and scanned reflects reality."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+        from metaflow_mcp_server.server import search_runs
+
+        dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        end_dt = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+        runs = [
+            MagicMock(
+                pathspec=f"F/{i}", id=str(i), successful=True, finished=True,
+                created_at=dt, finished_at=end_dt, user_tags=set(),
+            )
+            for i in range(3)
+        ]
+        flow = MagicMock()
+        flow.__iter__ = lambda self: iter(runs)
+        with patch("metaflow.Flow", return_value=flow), \
+             patch("metaflow.namespace"):
+            result = json.loads(search_runs("F", last_n=10))
+
+        assert result["scan_limit_hit"] is False
+        assert result["scanned"] == 3
+
+    def test_get_run_summary_mode_returns_counts_and_failing_tasks_only(self):
+        """summary=True returns per-step counts + only the failing tasks."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+        from metaflow_mcp_server.server import get_run
+
+        dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        end_dt = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+
+        # 10 tasks in one step: 7 ok, 2 failed, 1 still running.
+        tasks = []
+        for i in range(7):
+            tasks.append(MagicMock(
+                id=str(i), successful=True, finished=True,
+                created_at=dt, finished_at=end_dt,
+            ))
+        for i in range(7, 9):
+            tasks.append(MagicMock(
+                id=str(i), successful=False, finished=True,
+                created_at=dt, finished_at=end_dt,
+            ))
+        tasks.append(MagicMock(
+            id="9", successful=False, finished=False,
+            created_at=dt, finished_at=None,
+        ))
+
+        step = MagicMock(id="train", created_at=dt)
+        step.__iter__ = lambda self: iter(tasks)
+
+        run = MagicMock(
+            pathspec="F/1", successful=False, finished=True,
+            created_at=dt, finished_at=end_dt, user_tags=set(),
+        )
+        run.__iter__ = lambda self: iter([step])
+
+        with patch("metaflow.Run", return_value=run):
+            result = json.loads(get_run("F/1", summary=True))
+
+        assert result["summary"] is True
+        assert len(result["steps"]) == 1
+        s = result["steps"][0]
+        assert s["task_count"] == 10
+        assert s["successful_count"] == 7
+        assert s["failed_count"] == 2
+        assert s["running_count"] == 1
+        # Only failing tasks are listed by id — successful ones are folded
+        # into counts so the payload stays bounded on huge fan-outs.
+        assert {t["id"] for t in s["failed_tasks"]} == {"7", "8"}
+        assert "tasks" not in s  # no full task list in summary mode
+
+    def test_get_card_default_excludes_html(self):
+        """Default response strips full HTML — agents get text + size hint."""
+        from unittest.mock import MagicMock, patch
+        from metaflow_mcp_server.server import get_card
+
+        html = "<html><body><h1>Title</h1><p>Some text</p></body></html>"
+        card = MagicMock(type="default", id="0", hash="abc")
+        card.get.return_value = html
+
+        task = MagicMock(pathspec="F/1/s/0")
+        task.__iter__ = lambda self: iter([])  # not used by the resolver path below
+
+        with patch(
+            "metaflow_mcp_server.server._resolve_tasks_for_cards",
+            return_value=[(task, "F/1/s/0")],
+        ), patch("metaflow.cards.get_cards", return_value=[card]):
+            result = json.loads(get_card("F/1/s"))
+
+        assert "html" not in result, "HTML must be omitted by default to keep payload small"
+        assert "text_content" in result
+        assert "Title" in result["text_content"]
+        assert result["html_bytes"] == len(html)
+
+    def test_get_card_include_html_true(self):
+        """include_html=True restores full HTML for callers that need it."""
+        from unittest.mock import MagicMock, patch
+        from metaflow_mcp_server.server import get_card
+
+        html = "<html><body><h1>Title</h1></body></html>"
+        card = MagicMock(type="default", id="0", hash="abc")
+        card.get.return_value = html
+
+        task = MagicMock(pathspec="F/1/s/0")
+        with patch(
+            "metaflow_mcp_server.server._resolve_tasks_for_cards",
+            return_value=[(task, "F/1/s/0")],
+        ), patch("metaflow.cards.get_cards", return_value=[card]):
+            result = json.loads(get_card("F/1/s", include_html=True))
+
+        assert result["html"] == html
+        assert result["html_bytes"] == len(html)
+
+    def test_get_run_default_returns_full_task_detail(self):
+        """summary defaults to False → full per-task list preserved."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+        from metaflow_mcp_server.server import get_run
+
+        dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        end_dt = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+        tasks = [
+            MagicMock(
+                id=str(i), successful=True, finished=True,
+                created_at=dt, finished_at=end_dt,
+            )
+            for i in range(3)
+        ]
+        step = MagicMock(id="train", created_at=dt)
+        step.__iter__ = lambda self: iter(tasks)
+        run = MagicMock(
+            pathspec="F/1", successful=True, finished=True,
+            created_at=dt, finished_at=end_dt, user_tags=set(),
+        )
+        run.__iter__ = lambda self: iter([step])
+
+        with patch("metaflow.Run", return_value=run):
+            result = json.loads(get_run("F/1"))
+
+        assert result["summary"] is False
+        s = result["steps"][0]
+        assert "tasks" in s
+        assert len(s["tasks"]) == 3
+        assert "task_count" not in s
+        assert "failed_tasks" not in s
 
     def test_package_type_filter(self, run_tool):
         """package_type filter is accepted without crashing (even on non-conda tasks)."""

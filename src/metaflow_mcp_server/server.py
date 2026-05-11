@@ -265,15 +265,20 @@ def _get_env_from_task(task, flow_name):
                             "package_count": len(packages),
                         }, "netflix"
         except ImportError:
-            pass
-        except Exception:
-            pass
+            fallback_error = "metaflow_extensions.nflx package not installed"
+        except Exception as e:
+            fallback_error = f"{type(e).__name__}: {e}"
+        else:
+            fallback_error = (
+                "code-package, conda manifest, or env_for() returned empty"
+            )
 
         return {
             "req_id": req_id,
             "full_id": full_id,
             "arch": arch,
             "note": "Environment ID found but full package list unavailable.",
+            "error": fallback_error,
         }, "metadata_only"
 
     # Tier 2: OSS — conda.manifest from code package
@@ -307,13 +312,17 @@ def _get_env_from_task(task, flow_name):
                     "package_count": len(packages),
                 }, "oss"
         except ImportError:
-            pass
-        except Exception:
-            pass
+            fallback_error = "metaflow.plugins.pypi.conda_environment not importable"
+        except Exception as e:
+            fallback_error = f"{type(e).__name__}: {e}"
+        else:
+            fallback_error = "CondaEnvironment.get_client_info returned empty"
+
 
         return {
             "conda_env_prefix": conda_prefix,
             "note": "Conda prefix found but package details unavailable.",
+            "error": fallback_error,
         }, "metadata_only"
 
     return None, None
@@ -492,11 +501,13 @@ def search_runs(
 
     runs = []
     scanned = 0
+    scan_limit_hit = False
     MAX_SCAN = 200
 
     for run in flow:
         scanned += 1
         if scanned > MAX_SCAN:
+            scan_limit_hit = True
             break
 
         created = _ensure_tz(run.created_at)
@@ -536,37 +547,86 @@ def search_runs(
         if len(runs) >= last_n:
             break
 
-    return _json({"flow": flow_name, "count": len(runs), "runs": runs})
+    return _json(
+        {
+            "flow": flow_name,
+            "count": len(runs),
+            "scanned": scanned if not scan_limit_hit else MAX_SCAN,
+            "scan_limit_hit": scan_limit_hit,
+            "scan_limit": MAX_SCAN,
+            "runs": runs,
+        }
+    )
 
 
 @mcp.tool()
 @_handle_errors
-def get_run(pathspec: str) -> str:
+def get_run(pathspec: str, summary: bool = False) -> str:
     """Get detailed status of a run including per-step breakdown.
+
+    By default returns every task in every step — for flows with large
+    foreach fan-outs (hundreds/thousands of tasks per step) this payload can
+    be enormous. Pass summary=True to get per-step counts + only the failing
+    tasks, which is usually what you want when diagnosing a failure.
 
     Args:
         pathspec: Run pathspec like "FlowName/RunID".
+        summary: If True, return per-step task counts (total/successful/failed/running)
+                 and list only failing tasks. Recommended for foreach-heavy flows.
+                 Default False preserves full per-task detail.
     """
     from metaflow import Run
 
     run = Run(pathspec)
     steps = []
     for step in run:
-        tasks = []
-        for task in step:
-            tasks.append(
+        if summary:
+            total = 0
+            successful = 0
+            failed_tasks = []
+            running = 0
+            for task in step:
+                total += 1
+                if task.successful:
+                    successful += 1
+                elif task.finished and not task.successful:
+                    failed_tasks.append(
+                        {
+                            "id": task.id,
+                            "created_at": str(task.created_at),
+                            "finished_at": str(task.finished_at) if task.finished_at else None,
+                            "duration_seconds": _duration(task.created_at, task.finished_at),
+                        }
+                    )
+                elif not task.finished:
+                    running += 1
+            steps.append(
                 {
-                    "id": task.id,
-                    "successful": task.successful,
-                    "finished": task.finished,
-                    "created_at": str(task.created_at),
-                    "finished_at": str(task.finished_at) if task.finished_at else None,
-                    "duration_seconds": _duration(task.created_at, task.finished_at),
+                    "step": step.id,
+                    "created_at": str(step.created_at),
+                    "task_count": total,
+                    "successful_count": successful,
+                    "failed_count": len(failed_tasks),
+                    "running_count": running,
+                    "failed_tasks": failed_tasks,
                 }
             )
-        steps.append(
-            {"step": step.id, "created_at": str(step.created_at), "tasks": tasks}
-        )
+        else:
+            tasks = []
+            for task in step:
+                tasks.append(
+                    {
+                        "id": task.id,
+                        "successful": task.successful,
+                        "finished": task.finished,
+                        "created_at": str(task.created_at),
+                        "finished_at": str(task.finished_at) if task.finished_at else None,
+                        "duration_seconds": _duration(task.created_at, task.finished_at),
+                    }
+                )
+            steps.append(
+                {"step": step.id, "created_at": str(step.created_at), "tasks": tasks}
+            )
 
     return _json(
         {
@@ -577,6 +637,7 @@ def get_run(pathspec: str) -> str:
             "finished_at": str(run.finished_at) if run.finished_at else None,
             "duration_seconds": _duration(run.created_at, run.finished_at),
             "tags": sorted(run.user_tags),
+            "summary": summary,
             "steps": steps,
         }
     )
@@ -656,18 +717,19 @@ def list_artifacts(pathspec: str) -> str:
 
     artifacts = []
     for art in task:
+        entry = {
+            "name": art.id,
+            "sha": art.sha,
+            "created_at": str(art.created_at),
+        }
         try:
-            art_type = type(art.data).__name__
-        except Exception:
-            art_type = "unknown"
-        artifacts.append(
-            {
-                "name": art.id,
-                "type": art_type,
-                "sha": art.sha,
-                "created_at": str(art.created_at),
-            }
-        )
+            entry["type"] = type(art.data).__name__
+        except Exception as e:
+            # art.data deserializes from the datastore — surface the failure
+            # so callers can tell "type unknown" from "deserialization broken."
+            entry["type"] = "unknown"
+            entry["type_error"] = f"{type(e).__name__}: {e}"
+        artifacts.append(entry)
     return _json({"pathspec": task.pathspec, "artifacts": artifacts})
 
 
@@ -753,12 +815,13 @@ def get_card(
     card_index: int = 0,
     card_type: str | None = None,
     card_id: str | None = None,
+    include_html: bool = False,
 ) -> str:
-    """Get a Metaflow card's content as HTML.
+    """Get a Metaflow card's content.
 
-    Retrieves the card HTML from the datastore and returns it along with
-    extracted text content for analysis. Save the html field to a local
-    .html file and open it in your browser to view the card visually.
+    Returns text content extracted from the card by default. Cards can be
+    multi-megabyte HTML — set include_html=True only when you actually need
+    to save it to a file and open in a browser.
 
     Use list_cards first to discover available cards.
 
@@ -768,6 +831,8 @@ def get_card(
         card_index: Which card to retrieve if multiple exist (default 0).
         card_type: Filter cards by type before selecting by index.
         card_id: Filter cards by ID before selecting by index.
+        include_html: If True, include the full raw HTML in the response.
+                      Default False — text_content is usually enough for analysis.
     """
     from metaflow.cards import get_cards
 
@@ -798,17 +863,18 @@ def get_card(
     if len(text_content) > max_text_len:
         text_content = text_content[:max_text_len] + "\n... (truncated)"
 
-    return _json(
-        {
-            "pathspec": pathspec,
-            "task": label,
-            "card_type": card.type,
-            "card_id": card.id,
-            "card_hash": card.hash,
-            "html": html,
-            "text_content": text_content,
-        }
-    )
+    response = {
+        "pathspec": pathspec,
+        "task": label,
+        "card_type": card.type,
+        "card_id": card.id,
+        "card_hash": card.hash,
+        "text_content": text_content,
+        "html_bytes": len(html),
+    }
+    if include_html:
+        response["html"] = html
+    return _json(response)
 
 
 @mcp.tool()
@@ -1108,6 +1174,7 @@ def get_source_code(
     else:
         # Return main flowspec + file listing
         file_list = []
+        listing_error = None
         try:
             tarball = code.tarball
             for member in tarball.getmembers():
@@ -1116,15 +1183,18 @@ def get_source_code(
                         "name": member.name,
                         "size": member.size,
                     })
-        except Exception:
-            pass  # tarball listing failed, still return flowspec
+        except Exception as e:
+            listing_error = f"{type(e).__name__}: {e}"
 
-        return _json({
+        response = {
             "pathspec": pathspec,
             "main_file": code.info.get("script", "unknown"),
             "flowspec": code.flowspec,
             "files": file_list,
-        })
+        }
+        if listing_error:
+            response["files_error"] = listing_error
+        return _json(response)
 
 
 def _diff_run_metadata(run_a, run_b):
